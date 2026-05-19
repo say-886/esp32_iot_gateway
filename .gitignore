@@ -4,3 +4,5 @@ managed_components/*
 !managed_components/.gitkeep
 *.log
 *.tmp
+datasheets/
+*.pdf
