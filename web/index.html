@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32 IoT Gateway</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="dashboard">
+    <header class="topbar">
+      <div>
+        <h1>ESP32 IoT Gateway</h1>
+        <p>V0 准备版 · 静态假数据 Dashboard</p>
+      </div>
+      <span id="device-state" class="state-pill">INIT</span>
+    </header>
+
+    <section class="grid metrics" aria-label="传感器数据">
+      <article class="panel metric">
+        <span class="label">温度</span>
+        <strong><span id="temperature">26.5</span> °C</strong>
+      </article>
+      <article class="panel metric">
+        <span class="label">湿度</span>
+        <strong><span id="humidity">60.2</span> %</strong>
+      </article>
+      <article class="panel metric">
+        <span class="label">光照</span>
+        <strong><span id="light">380</span> lx</strong>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <h2>设备状态</h2>
+        <dl class="status-list">
+          <div><dt>WiFi</dt><dd id="wifi">未连接</dd></div>
+          <div><dt>MQTT</dt><dd id="mqtt">未连接</dd></div>
+          <div><dt>运行时间</dt><dd id="uptime">0 s</dd></div>
+          <div><dt>错误码</dt><dd id="error-code">0</dd></div>
+          <div><dt>固件版本</dt><dd id="firmware">v0.1.0-prep</dd></div>
+        </dl>
+      </article>
+
+      <article class="panel">
+        <h2>远程控制</h2>
+        <div class="control-list">
+          <button type="button" class="control-button" data-target="led">LED：关闭</button>
+          <button type="button" class="control-button" data-target="buzzer">蜂鸣器：关闭</button>
+          <button type="button" class="control-button" data-target="relay">继电器：关闭</button>
+        </div>
+      </article>
+    </section>
+
+    <section class="panel">
+      <h2>接口预览</h2>
+      <pre id="payload"></pre>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
