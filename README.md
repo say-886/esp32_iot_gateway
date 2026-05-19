@@ -51,7 +51,15 @@
 
 ```text
 esp32_iot_gateway/
+├── assets/
+│   ├── images/
+│   └── videos/
 ├── CMakeLists.txt
+├── docs/
+│   ├── api/
+│   ├── architecture/
+│   ├── daily_logs/
+│   └── hardware/
 ├── main/
 │   ├── app_main.c
 │   ├── app_tasks.c
@@ -67,11 +75,25 @@ esp32_iot_gateway/
 │   ├── web_server/
 │   ├── mqtt_service/
 │   └── storage_nvs/
+├── managed_components/
+├── scripts/
+├── tools/
 ├── web/
 │   ├── index.html
 │   ├── style.css
 │   └── app.js
+├── sdkconfig
 └── partitions.csv
+```
+
+每个 `components/*` 模块都预留了以下结构：
+
+```text
+component_name/
+├── CMakeLists.txt
+├── include/
+│   └── component_name.h
+└── src/
 ```
 
 ## HTTP API 设计
