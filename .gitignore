@@ -7,6 +7,7 @@ managed_components/
 __pycache__/
 .pytest_cache/
 .vscode/
+node_modules/
 
 # Local logs and temporary files
 *.log
