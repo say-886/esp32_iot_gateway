@@ -1,6 +1,11 @@
 #ifndef OLED_SSD1306_H
 #define OLED_SSD1306_H
 
-/* SSD1306 display driver declarations will be added here. */
+#include "device_status.h"
+#include "esp_err.h"
+
+esp_err_t oled_init(void);
+void oled_clear(void);
+void oled_show_status(const device_status_t *status);
 
 #endif

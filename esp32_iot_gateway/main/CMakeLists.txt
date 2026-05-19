@@ -4,4 +4,7 @@ idf_component_register(
         "app_tasks.c"
     INCLUDE_DIRS
         "."
+    REQUIRES
+        app_common
+        app_state
 )

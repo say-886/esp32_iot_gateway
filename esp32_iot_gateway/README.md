@@ -51,49 +51,57 @@
 
 ```text
 esp32_iot_gateway/
-├── assets/
-│   ├── images/
-│   └── videos/
 ├── CMakeLists.txt
-├── docs/
-│   ├── api/
-│   ├── architecture/
-│   ├── daily_logs/
-│   └── hardware/
+├── sdkconfig.defaults
+├── partitions.csv
+├── README.md
+├── .gitignore
 ├── main/
+│   ├── CMakeLists.txt
 │   ├── app_main.c
 │   ├── app_tasks.c
+│   ├── app_tasks.h
 │   ├── app_config.h
-│   └── CMakeLists.txt
+│   └── app_version.h
 ├── components/
+│   ├── board/
 │   ├── app_common/
 │   ├── app_state/
 │   ├── device_control/
+│   ├── button/
 │   ├── sensor_aht20/
 │   ├── sensor_bh1750/
 │   ├── oled_ssd1306/
+│   ├── wifi_manager/
 │   ├── web_server/
 │   ├── mqtt_service/
-│   └── storage_nvs/
-├── managed_components/
-├── scripts/
-├── tools/
+│   ├── storage_nvs/
+│   ├── watchdog_service/
+│   ├── ota_service/
+│   └── mongoose/
 ├── web/
 │   ├── index.html
 │   ├── style.css
 │   └── app.js
-├── sdkconfig
-└── partitions.csv
+├── docs/
+│   ├── hardware_connection.md
+│   ├── mqtt_topic.md
+│   ├── api_design.md
+│   ├── task_design.md
+│   └── interview_notes.md
+└── tools/
+    ├── mqtt_test_payload.json
+    └── api_test.md
 ```
 
-每个 `components/*` 模块都预留了以下结构：
+普通组件目录采用以下结构：
 
 ```text
 component_name/
 ├── CMakeLists.txt
 ├── include/
 │   └── component_name.h
-└── src/
+└── component_name.c
 ```
 
 ## HTTP API 设计
