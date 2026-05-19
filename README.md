@@ -11,7 +11,7 @@
 | Git 仓库 | 已初始化 | 根目录为 `C:\desktop\ESP32 Project` |
 | ESP-IDF 工程骨架 | 已创建 | 位于 `esp32_iot_gateway/` |
 | Web 假数据页面 | 已创建 | 可直接打开 `web/index.html` |
-| ESP-IDF 编译验证 | 待完成 | 当前终端未识别 `idf.py` |
+| ESP-IDF 编译验证 | 已完成 | ESP-IDF v5.3.2 安装在 `E:\ESP`，`idf.py build` 已通过 |
 | 硬件验证 | 待完成 | ESP32 与外设尚未到货 |
 
 ## 硬件清单
@@ -154,13 +154,32 @@ esp32_iot_gateway/
 | 天数 | 目标 | 当前结果 |
 | --- | --- | --- |
 | D0 | 创建仓库、README 初稿、硬件清单、接线表模板、项目名称和模块划分 | 已完成 |
-| D1 | 安装工具链、设置目标芯片、编译 hello_world | 工具链部分可用，`idf.py` 待安装或激活 |
+| D1 | 安装工具链、设置目标芯片、编译工程 | ESP-IDF v5.3.2 已安装到 `E:\ESP`，`idf.py set-target esp32` 和 `idf.py build` 已通过 |
 | D2 | 新建工程结构，建立 `main/`、`components/`、`web/`，添加配置和入口文件 | 已完成骨架 |
 | D3 | 设计状态结构、命令结构、错误码、MQTT Topic、HTTP API，写 Web 假数据页面 | 已完成 |
 
 ## ESP-IDF 环境步骤
 
-当前 PowerShell 中 `idf.py` 未激活。后续安装或激活 ESP-IDF 后，在本目录执行：
+ESP-IDF 已安装到 `E:\ESP\frameworks\esp-idf-v5.3.2`，工具链和 Python 环境位于 `E:\ESP\tools`。每次打开新终端后，先激活环境：
+
+```powershell
+$env:IDF_TOOLS_PATH = "E:\ESP\tools"
+& "E:\ESP\frameworks\esp-idf-v5.3.2\export.ps1"
+```
+
+也可以直接运行已准备好的脚本：
+
+```powershell
+& "E:\ESP\activate_esp_idf.ps1"
+```
+
+cmd 终端可运行：
+
+```bat
+E:\ESP\activate_esp_idf.bat
+```
+
+然后在工程目录执行：
 
 ```powershell
 cd "C:\desktop\ESP32 Project\esp32_iot_gateway"
@@ -168,7 +187,13 @@ idf.py set-target esp32
 idf.py build
 ```
 
-如果已经安装 ESP-IDF 但当前终端无法识别 `idf.py`，先运行 ESP-IDF 的导出脚本或使用 VS Code ESP-IDF 插件打开工程，再执行构建。
+当前已验证通过的版本：
+
+```text
+ESP-IDF v5.3.2
+target: esp32
+build: passed
+```
 
 ## 后续每日任务入口
 
