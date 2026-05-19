@@ -1,0 +1,13 @@
+# ESP-IDF build outputs
+build/
+esp32_iot_gateway/build/
+managed_components/
+
+# Python and editor noise
+__pycache__/
+.pytest_cache/
+.vscode/
+
+# Local logs and temporary files
+*.log
+*.tmp
