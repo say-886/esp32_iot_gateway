@@ -1,6 +1,9 @@
 #ifndef WEB_SERVER_H
 #define WEB_SERVER_H
 
-/* Mongoose or HTTP server declarations will be added here. */
+#include "esp_err.h"
+
+esp_err_t web_server_start(void);
+esp_err_t web_server_stop(void);
 
 #endif

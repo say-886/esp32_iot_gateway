@@ -12,7 +12,7 @@ void app_main(void)
     ESP_LOGI(TAG, "Project: %s", APP_PROJECT_NAME);
     ESP_LOGI(TAG, "Firmware: %s", g_device_status.firmware_version);
     ESP_LOGI(TAG, "Current state: %s",
-             app_device_state_to_string(g_device_status.state));
+             app_state_to_string(g_device_status.state));
     ESP_LOGI(TAG, "HTTP APIs: %s, %s, %s, %s",
              APP_HTTP_API_STATUS,
              APP_HTTP_API_CONTROL,

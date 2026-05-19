@@ -1,4 +1,6 @@
 idf_component_register(
+    SRCS
+        "sensor_aht20.c"
     INCLUDE_DIRS
         "include"
 )
