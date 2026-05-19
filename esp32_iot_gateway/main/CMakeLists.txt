@@ -7,4 +7,10 @@ idf_component_register(
     REQUIRES
         app_common
         app_state
+        board
+        device_control
+        storage_nvs
+        watchdog_service
+        web_server
+        wifi_manager
 )

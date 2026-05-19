@@ -30,4 +30,12 @@ typedef struct {
     bool relay_value;
 } device_cmd_t;
 
+void device_status_init_default(device_status_t *status);
+void device_status_store_init(void);
+void device_status_get(device_status_t *status);
+void device_status_update_sensor(float temperature, float humidity, float light);
+void device_status_update_control(const device_cmd_t *cmd);
+void device_status_update_network(bool wifi_connected, bool mqtt_connected);
+void device_status_tick(uint32_t seconds);
+
 #endif

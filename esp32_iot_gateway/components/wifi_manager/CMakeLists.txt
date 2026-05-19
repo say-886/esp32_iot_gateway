@@ -4,7 +4,9 @@ idf_component_register(
     INCLUDE_DIRS
         "include"
     REQUIRES
+        app_common
         esp_event
         esp_netif
         esp_wifi
+        storage_nvs
 )
