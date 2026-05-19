@@ -160,14 +160,29 @@ esp32_iot_gateway/
 
 ## ESP-IDF 环境步骤
 
-ESP-IDF 已安装到 `E:\ESP\frameworks\esp-idf-v5.3.2`，工具链和 Python 环境位于 `E:\ESP\tools`。每次打开新终端后，先激活环境：
+ESP-IDF 已安装到 `E:\ESP\frameworks\esp-idf-v5.3.2`，工具链和 Python 环境位于 `E:\ESP\tools`。已配置用户级环境变量：
+
+| 变量 | 值 |
+| --- | --- |
+| `IDF_PATH` | `E:\ESP\frameworks\esp-idf-v5.3.2` |
+| `IDF_TOOLS_PATH` | `E:\ESP\tools` |
+| `IDF_PYTHON_ENV_PATH` | `E:\ESP\tools\python_env\idf5.3_py3.12_env` |
+
+用户级 `PATH` 已加入 ESP-IDF 工具链目录。重新打开 PowerShell 或 cmd 后，通常可以直接运行：
+
+```powershell
+idf.py --version
+idf.py build
+```
+
+如果当前终端还没刷新环境变量，可以临时运行：
 
 ```powershell
 $env:IDF_TOOLS_PATH = "E:\ESP\tools"
 & "E:\ESP\frameworks\esp-idf-v5.3.2\export.ps1"
 ```
 
-也可以直接运行已准备好的脚本：
+也可以运行已准备好的备用脚本：
 
 ```powershell
 & "E:\ESP\activate_esp_idf.ps1"
