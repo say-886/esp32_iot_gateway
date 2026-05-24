@@ -11,6 +11,13 @@
 static const char *TAG = "web_server";
 static httpd_handle_t s_server;
 
+/**
+ * @brief 处理状态查询接口，返回当前设备状态的 JSON 快照。
+ *
+ * @param req HTTP 请求对象。
+ *
+ * @return 成功返回 `ESP_OK`，失败返回对应 HTTP/ESP 错误码。
+ */
 static esp_err_t status_handler(httpd_req_t *req)
 {
     device_status_t status;
@@ -44,6 +51,16 @@ static esp_err_t status_handler(httpd_req_t *req)
     return httpd_resp_send(req, response, len);
 }
 
+/**
+ * @brief 判断指定 JSON 键的值是否为真。
+ *
+ * 这里使用轻量字符串匹配，适合当前演示接口的简单布尔字段解析。
+ *
+ * @param body 待解析的请求体字符串。
+ * @param key 需要查找的 JSON 键名。
+ *
+ * @return `true` 表示键存在且值为真，`false` 表示未匹配到真值。
+ */
 static bool json_bool_is_true(const char *body, const char *key)
 {
     const char *pos = strstr(body, key);
@@ -53,11 +70,26 @@ static bool json_bool_is_true(const char *body, const char *key)
     return strstr(pos, ":1") != NULL || strstr(pos, ":true") != NULL;
 }
 
+/**
+ * @brief 判断请求体中是否包含指定 JSON 键。
+ *
+ * @param body 待解析的请求体字符串。
+ * @param key 需要查找的 JSON 键名。
+ *
+ * @return `true` 表示找到该键，`false` 表示未找到。
+ */
 static bool json_has_key(const char *body, const char *key)
 {
     return strstr(body, key) != NULL;
 }
 
+/**
+ * @brief 处理控制接口，根据请求体更新目标执行器状态。
+ *
+ * @param req HTTP 请求对象。
+ *
+ * @return 成功返回 `ESP_OK`，失败返回对应 HTTP/ESP 错误码。
+ */
 static esp_err_t control_handler(httpd_req_t *req)
 {
     char body[128] = {0};
@@ -80,6 +112,11 @@ static esp_err_t control_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
+/**
+ * @brief 启动 HTTP 服务器并注册状态、控制接口。
+ *
+ * @return 成功返回 `ESP_OK`，失败返回对应 ESP-IDF 错误码。
+ */
 esp_err_t web_server_start(void)
 {
     if (s_server != NULL) {
@@ -110,6 +147,11 @@ esp_err_t web_server_start(void)
     return ESP_OK;
 }
 
+/**
+ * @brief 停止已启动的 HTTP 服务器。
+ *
+ * @return 成功返回 `ESP_OK`，失败返回对应 ESP-IDF 错误码。
+ */
 esp_err_t web_server_stop(void)
 {
     if (s_server != NULL) {

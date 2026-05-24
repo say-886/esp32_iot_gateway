@@ -2,17 +2,22 @@
 
 基于 ESP32 + ESP-IDF + FreeRTOS + Mongoose 的环境监测与远程控制网关。
 
-当前阶段是硬件到货前准备版 V0，目标是先完成项目结构、接口设计、文档和 Web 假数据页面。当前不声明已经完成烧录、传感器读取、WiFi、MQTT 或真实硬件控制。
+当前阶段已完成 ESP-IDF 环境打通、工程编译烧写监视验证，以及按键、执行器、WiFi、Web API、前端页面、MQTT 主流程联调。当前仍需继续收口 OLED 实机显示、AHT20 长时间稳定性、OTA 和异常恢复等剩余能力。
 
 ## 当前状态
 
 | 项目 | 状态 | 说明 |
 | --- | --- | --- |
 | Git 仓库 | 已初始化 | 根目录为 `C:\desktop\ESP32 Project` |
-| ESP-IDF 工程骨架 | 已创建 | 位于 `esp32_iot_gateway/` |
-| Web 假数据页面 | 已创建 | 可直接打开 `web/index.html` |
-| ESP-IDF 编译验证 | 已完成 | ESP-IDF v5.3.2 安装在 `E:\ESP`，`idf.py build` 已通过 |
-| 硬件验证 | 待完成 | ESP32 与外设尚未到货 |
+| ESP-IDF 工程 | 已可编译、烧写、串口监视 | 命令行环境已验证可用 |
+| VS Code 构建 | 已打通 | 可通过 `tasks.json` 构建，不依赖 ESP-IDF 扩展 |
+| AHT20 | 已接入并增强稳定性 | I2C 地址 `0x38`，已支持忙位轮询、CRC 校验与失败恢复 |
+| BH1750 | 已验证 | I2C 地址 `0x23`，光照读取正常 |
+| I2C 总线接线 | 已确认 | 当前使用 `GPIO21/22` |
+| Web 前端 | 已支持设备端页面访问 | ESP32 现可直接提供 `/`、`/style.css`、`/app.js` 与 API |
+| 完整工程模式 | 已恢复 | 默认不再停留在 I2C Test Mode |
+| OLED | 已接入 SSD1306 驱动 | 启动时自动探测 `0x3C/0x3D`，在显示任务中刷新状态 |
+| 降级运行 | 已支持 | AHT20 异常时仍可继续验证 WiFi、Web API、MQTT 与 GPIO 控制 |
 
 ## 硬件清单
 
@@ -30,22 +35,26 @@
 | 10 | 有源蜂鸣器模块 | 告警输出 | 3.3V/5V 兼容优先 |
 | 11 | 单路继电器模块 | 模拟执行器控制 | 3.3V 可触发优先 |
 
-## 接线表模板
+## 当前引脚约定
 
-硬件到货后先确认开发板丝印，再填写最终 GPIO。以下仅作为模板，不作为已验证接线。
+当前已在工程中固定并使用以下引脚约定，详细接线请看 `docs/hardware_connection.md`：
 
-| 模块 | 信号 | ESP32 GPIO | 电源 | 备注 |
-| --- | --- | --- | --- | --- |
-| AHT20 | SDA | 待定 | 3.3V | I2C |
-| AHT20 | SCL | 待定 | 3.3V | I2C |
-| BH1750 | SDA | 待定 | 3.3V | I2C，可与 AHT20 共线 |
-| BH1750 | SCL | 待定 | 3.3V | I2C，可与 AHT20 共线 |
-| OLED SSD1306 | SDA | 待定 | 3.3V | I2C，可与传感器共线 |
-| OLED SSD1306 | SCL | 待定 | 3.3V | I2C，可与传感器共线 |
-| LED | IN | 待定 | 3.3V | GPIO 输出 |
-| 蜂鸣器 | IN | 待定 | 3.3V/5V | GPIO 输出 |
-| 继电器 | IN | 待定 | 3.3V/5V | GPIO 输出 |
-| 按键 | OUT | 待定 | 3.3V | GPIO 输入，需要消抖 |
+| 功能 | GPIO | 说明 |
+| --- | --- | --- |
+| I2C SDA | `GPIO21` | AHT20、BH1750 共用 |
+| I2C SCL | `GPIO22` | AHT20、BH1750 共用 |
+| LED | `GPIO2` | 输出控制 |
+| 蜂鸣器 | `GPIO25` | 输出控制，触发电平待实机确认 |
+| 继电器 | `GPIO26` | 输出控制，触发电平待实机确认 |
+| 按键 K1 | `GPIO27` | 短按切换 LED |
+| 按键 K2 | `GPIO14` | 短按切换蜂鸣器 |
+| 按键 K3 | `GPIO32` | 短按切换继电器 |
+| 按键 K4 | `GPIO33` | 短按全部关闭 |
+
+说明：
+
+- `GPIO0` 保留给开发板 `BOOT` 键，不再作为外接按键使用。
+- `OLED` 与 AHT20、BH1750 共用 `GPIO21/22` 的 I2C 总线，实机接线请参考 `docs/hardware_connection.md`。
 
 ## 工程目录
 
@@ -58,36 +67,39 @@ esp32_iot_gateway/
 ├── .gitignore
 ├── main/
 │   ├── CMakeLists.txt
-│   ├── app_main.c
-│   ├── app_tasks.c
-│   ├── app_tasks.h
-│   ├── app_config.h
-│   └── app_version.h
-├── components/
-│   ├── board/
-│   ├── app_common/
-│   ├── app_state/
-│   ├── device_control/
-│   ├── button/
-│   ├── sensor_aht20/
-│   ├── sensor_bh1750/
-│   ├── oled_ssd1306/
-│   ├── wifi_manager/
-│   ├── web_server/
-│   ├── mqtt_service/
-│   ├── storage_nvs/
-│   ├── watchdog_service/
-│   ├── ota_service/
-│   └── mongoose/
+│   ├── app_main.c       # 主程序入口
+│   ├── app_tasks.c      # 任务管理函数
+│   ├── app_tasks.h      # 任务管理函数头文件
+│   ├── app_config.h     # 应用配置头文件
+│   └── app_version.h    # 应用版本头文件
+├── components/            # 组件目录
+│   ├── board/             # 板级组件
+│   ├── app_common/        # 应用通用组件
+│   ├── app_state/         # 应用状态组件
+│   ├── device_control/    # 设备控制组件
+│   ├── button/            # 按键组件
+│   ├── sensor_aht20/      # AHT20 温湿度传感器组件
+│   ├── sensor_bh1750/    # BH1750 光照传感器组件
+│   ├── oled_ssd1306/     # OLED SSD1306 显示屏组件
+│   ├── wifi_manager/     # WiFi 管理组件
+│   ├── web_server/      # Web 服务器组件
+│   ├── mqtt_service/    # MQTT 服务组件
+│   ├── storage_nvs/      # NVS 存储组件
+│   ├── watchdog_service/ # 看门狗服务组件
+│   ├── ota_service/     # OTA 服务组件
+│   └── mongoose/        # Mongoose 服务组件
 ├── web/
 │   ├── index.html
 │   ├── style.css
 │   └── app.js
 ├── docs/
 │   ├── hardware_connection.md
+│   ├── system_architecture.md
 │   ├── mqtt_topic.md
 │   ├── api_design.md
 │   ├── task_design.md
+│   ├── debug_notes.md
+│   ├── project_roadmap.md
 │   └── interview_notes.md
 └── tools/
     ├── mqtt_test_payload.json
@@ -108,11 +120,11 @@ component_name/
 
 | 接口 | 方法 | 用途 | 当前状态 |
 | --- | --- | --- | --- |
-| `/api/status` | GET | 获取设备当前状态 | 已预留 |
-| `/api/control` | POST | 控制 LED、蜂鸣器、继电器 | 已预留 |
-| `/api/config` | GET | 获取当前配置 | 已预留 |
-| `/api/config` | POST | 设置采样周期、MQTT 地址、告警阈值 | 已预留 |
-| `/api/reboot` | POST | 设备重启 | 已预留 |
+| `/api/status` | GET | 获取设备当前状态 | 已实现，待联网实测 |
+| `/api/control` | POST | 控制 LED、蜂鸣器、继电器 | 已实现，待联网实测 |
+| `/api/config` | GET | 获取当前配置 | 已实现，待联网实测 |
+| `/api/config` | POST | 设置采样周期、MQTT 地址、告警阈值 | 已实现，待联网实测 |
+| `/api/reboot` | POST | 设备重启 | 已实现，待联网实测 |
 
 `GET /api/status` 示例：
 
@@ -179,6 +191,33 @@ component_name/
 | `4001` | OTA 失败 |
 | `5001` | 看门狗异常 |
 
+## 当前已验证
+
+- `ESP-IDF` 命令行环境可用。
+- 工程已可编译、烧写、串口监视。
+- `BH1750` 已验证地址 `0x23`，光照读取正常。
+- `I2C` 总线接线已确认正确。
+- `按键`、`LED`、`蜂鸣器`、`继电器` 已完成实机联调。
+- `WiFi`、前端页面、`Web API`、`MQTT` 主流程已打通。
+- `VS Code` 已可通过 `tasks.json` 执行构建。
+
+## 当前待验收
+
+- `OLED` 代码已接入，但仍需完成实机接线与显示验收。
+- `AHT20` 已从持续失败恢复到可读状态，但还需继续观察长时间稳定性。
+- `GET /api/config`、`POST /api/config`、`POST /api/reboot` 仍建议补一轮完整验收。
+- `OTA` 仍是后续单独实现与验收项。
+- `NVS`、看门狗、异常恢复仍需按场景补充验证。
+
+## 本地私有配置
+
+- 真实 `WiFi SSID/密码` 不建议直接写进仓库源码。
+- 工程现已支持本地私有配置文件：
+  `components/storage_nvs/include/storage_nvs_local.h`
+- 该文件已加入 `.gitignore`，不会被 Git 提交。
+- 示例模板见：
+  `components/storage_nvs/include/storage_nvs_local.example.h`
+
 ## D0-D3 完成情况
 
 | 天数 | 目标 | 当前结果 |
@@ -242,14 +281,14 @@ build: passed
 
 ## 后续每日任务入口
 
-硬件到货后从 D4 开始推进：
+建议按以下顺序继续推进：
 
-1. D4：连接开发板，确认串口，烧录 hello_world，记录烧录命令和串口号。
-2. D5：跑通 LED 与蜂鸣器 GPIO 输出，确定最终 GPIO 表。
-3. D6：实现按键输入和软件消抖。
-4. D7：实现 I2C Scanner，确认 AHT20、BH1750、OLED 地址。
-5. D8-D10：实现 AHT20、BH1750、OLED，完成基础传感器闭环。
+1. 切回完整工程模式后，逐个验证 `LED`、蜂鸣器、继电器、按键。
+2. 写入真实 `WiFi` 配置，联调 `Web API`。
+3. 验证 `MQTT` 五个主题的真实收发。
+4. 等新 `OLED` 到货后，再做地址扫描、初始化与显示联调。
+5. 最后做 `OTA`、`NVS`、看门狗和异常恢复场景验证。
 
 ## 不夸大声明
 
-当前版本只完成硬件到货前准备工作。真实硬件驱动、烧录、串口日志、传感器数据、WiFi、Mongoose、MQTT、NVS、看门狗和 OTA 都需要在后续阶段逐项验证后再写入简历或项目成果。
+当前版本已经完成环境搭建、工程构建烧写监视验证，以及 `AHT20/BH1750/I2C` 基础联调；但 `WiFi`、`Web API`、`MQTT`、全部 GPIO、`OLED`、`OTA`、`NVS` 异常恢复、看门狗场景等仍需要继续实机验证后，才能写入简历或项目成果。

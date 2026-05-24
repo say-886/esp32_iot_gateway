@@ -5,4 +5,7 @@ idf_component_register(
         "include"
     REQUIRES
         app_common
+        app_state
+        board
+        driver
 )

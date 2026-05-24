@@ -1,19 +1,38 @@
 #ifndef BOARD_H
 #define BOARD_H
 
+#include "driver/i2c.h"
 #include "esp_err.h"
 #include "hal/gpio_types.h"
 
+#define BOARD_I2C_PORT I2C_NUM_0
+#define BOARD_I2C_FREQ_HZ 100000
 #define BOARD_I2C_SDA_GPIO GPIO_NUM_21
 #define BOARD_I2C_SCL_GPIO GPIO_NUM_22
+#define BOARD_AHT20_I2C_ADDR 0x38
+#define BOARD_BH1750_I2C_ADDR 0x23
+#define BOARD_OLED_I2C_ADDR_PRIMARY 0x3C
+#define BOARD_OLED_I2C_ADDR_SECONDARY 0x3D
 #define BOARD_LED_GPIO GPIO_NUM_2
+#define BOARD_LED_1_GPIO GPIO_NUM_2
 #define BOARD_BUZZER_GPIO GPIO_NUM_25
 #define BOARD_RELAY_GPIO GPIO_NUM_26
-#define BOARD_BUTTON_1_GPIO GPIO_NUM_0
+#define BOARD_LED_ACTIVE_LEVEL 1
+#define BOARD_BUZZER_ACTIVE_LEVEL 1
+#define BOARD_RELAY_ACTIVE_LEVEL 1
+#define BOARD_BUTTON_1_GPIO GPIO_NUM_27
+#define BOARD_BUTTON_2_GPIO GPIO_NUM_14
+#define BOARD_BUTTON_3_GPIO GPIO_NUM_32
+#define BOARD_BUTTON_4_GPIO GPIO_NUM_33
 
 #define BOARD_OUTPUT_GPIO_MASK ((1ULL << BOARD_LED_GPIO) | \
                                 (1ULL << BOARD_BUZZER_GPIO) | \
                                 (1ULL << BOARD_RELAY_GPIO))
+
+#define BOARD_BUTTON_GPIO_MASK ((1ULL << BOARD_BUTTON_1_GPIO) | \
+                                (1ULL << BOARD_BUTTON_2_GPIO) | \
+                                (1ULL << BOARD_BUTTON_3_GPIO) | \
+                                (1ULL << BOARD_BUTTON_4_GPIO))
 
 esp_err_t board_init(void);
 
