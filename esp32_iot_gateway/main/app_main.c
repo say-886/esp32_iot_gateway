@@ -1,8 +1,15 @@
 #include "app_config.h"
 
 #include "board.h"
+#include "button.h"
 #include "device_control.h"
+#include "esp_err.h"
 #include "esp_log.h"
+#include "i2c_test.h"
+#include "mqtt_service.h"
+#include "oled_ssd1306.h"
+#include "sensor_aht20.h"
+#include "sensor_bh1750.h"
 #include "storage_nvs.h"
 #include "watchdog_service.h"
 #include "web_server.h"
@@ -11,8 +18,15 @@
 static const char *TAG = "app_main";
 static device_status_t g_device_status;
 
+/**
+ * @brief 启动网关应用并拉起所有核心服务。
+ *
+ * 该函数先初始化共享状态，再按依赖顺序初始化板级驱动、控制层、
+ * 持久化配置、网络服务和看门狗，最后创建占位任务。
+ */
 void app_main(void)
 {
+    /* 在其他服务使用状态前，先准备内存中的状态快照。 */
     app_status_init(&g_device_status);
     device_status_store_init();
 
@@ -32,12 +46,56 @@ void app_main(void)
              APP_MQTT_TOPIC_CMD,
              APP_MQTT_TOPIC_ERROR);
 
+    /* 按依赖顺序启动硬件和共享服务。 */
+#if APP_ENABLE_I2C_TEST_MODE
+    ESP_LOGW(TAG, "I2C test mode is enabled. WiFi/Web/MQTT services will not start.");
+    ESP_ERROR_CHECK(board_init());
+    ESP_ERROR_CHECK(i2c_test_start());
+    return;
+#endif
+
     ESP_ERROR_CHECK(board_init());
     ESP_ERROR_CHECK(device_control_init());
+    ESP_ERROR_CHECK(button_init());
+
+    esp_err_t oled_ret = oled_init();
+    if (oled_ret != ESP_OK) {
+        ESP_LOGW(TAG, "OLED init skipped: %s. Check SSD1306 wiring/address.",
+                 esp_err_to_name(oled_ret));
+    } else {
+        ESP_LOGI(TAG, "OLED init OK");
+    }
+
+    esp_err_t sensor_ret = aht20_init();
+    if (sensor_ret != ESP_OK) {
+        ESP_LOGE(TAG, "AHT20 init failed: %s. Check VCC/GND/SDA/SCL wiring.",
+                 esp_err_to_name(sensor_ret));
+        device_status_set_error(APP_ERR_AHT20_READ_FAILED);
+    } else {
+        ESP_LOGI(TAG, "AHT20 init OK");
+    }
+
+    sensor_ret = bh1750_init();
+    if (sensor_ret != ESP_OK) {
+        ESP_LOGE(TAG, "BH1750 init failed: %s. Check VCC/GND/SDA/SCL wiring.",
+                 esp_err_to_name(sensor_ret));
+        device_status_set_error(APP_ERR_BH1750_READ_FAILED);
+    } else {
+        ESP_LOGI(TAG, "BH1750 init OK");
+    }
+
     ESP_ERROR_CHECK(storage_nvs_init());
+
+#if APP_ENABLE_NETWORK_SERVICES
     ESP_ERROR_CHECK(wifi_manager_init());
     ESP_ERROR_CHECK(wifi_manager_start());
     ESP_ERROR_CHECK(web_server_start());
+#else
+    ESP_LOGW(TAG, "Network services are disabled. WiFi/Web/MQTT will not start.");
+#endif
+
     ESP_ERROR_CHECK(watchdog_service_init());
+
+    /* 平台服务准备完成后，再启动演示任务。 */
     app_create_placeholder_tasks();
 }

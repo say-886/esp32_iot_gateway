@@ -9,6 +9,12 @@ idf_component_register(
         app_state
         board
         device_control
+        i2c_test
+        mqtt_service
+        button
+        oled_ssd1306
+        sensor_aht20
+        sensor_bh1750
         storage_nvs
         watchdog_service
         web_server

@@ -1,0 +1,9 @@
+单路继电器：
+https://www.keyesrobot.cn/projects/commonsensor/zh-cn/latest/KE0052%20Keyes%205V%20%E5%8D%95%E8%B7%AF%E7%BB%A7%E7%94%B5%E5%99%A8%E6%A8%A1.html
+
+
+esp32
+https://github.com/espressif/arduino-esp32
+
+
+ 

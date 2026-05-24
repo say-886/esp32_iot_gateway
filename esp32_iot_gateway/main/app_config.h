@@ -22,7 +22,16 @@
 #define APP_MQTT_TOPIC_CMD "esp32/gateway/cmd"
 #define APP_MQTT_TOPIC_ERROR "esp32/gateway/error"
 
+/**
+ * @brief 使用默认值初始化应用状态结构体。
+ *
+ * @param status 输出参数，接收初始化后的状态结构体。
+ */
 void app_status_init(device_status_t *status);
+
+/**
+ * @brief 创建演示骨架中使用的占位 FreeRTOS 任务。
+ */
 void app_create_placeholder_tasks(void);
 
 #endif

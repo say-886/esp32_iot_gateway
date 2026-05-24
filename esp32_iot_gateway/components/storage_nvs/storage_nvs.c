@@ -17,6 +17,13 @@ static const app_config_t DEFAULT_CONFIG = {
     .sample_period_ms = 2000,
 };
 
+/**
+ * @brief 初始化 NVS Flash，必要时执行擦除恢复。
+ *
+ * 当分区空间不足或版本不兼容时，会先擦除再重新初始化。
+ *
+ * @return 成功返回 `ESP_OK`，失败返回对应 ESP-IDF 错误码。
+ */
 esp_err_t storage_nvs_init(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -27,12 +34,20 @@ esp_err_t storage_nvs_init(void)
     return err;
 }
 
+/**
+ * @brief 从 NVS 读取应用配置，不存在时回退到默认配置。
+ *
+ * @param config 输出参数，接收读取后的配置内容。
+ *
+ * @return 成功返回 `ESP_OK`，失败返回对应 ESP-IDF 错误码。
+ */
 esp_err_t storage_load_config(app_config_t *config)
 {
     if (config == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* 先填充默认值，避免 NVS 中不存在配置时出现未定义内容。 */
     *config = DEFAULT_CONFIG;
 
     nvs_handle_t handle;
@@ -55,6 +70,13 @@ esp_err_t storage_load_config(app_config_t *config)
     return err;
 }
 
+/**
+ * @brief 将应用配置整体写入 NVS。
+ *
+ * @param config 输入参数，待保存的配置内容。
+ *
+ * @return 成功返回 `ESP_OK`，失败返回对应 ESP-IDF 错误码。
+ */
 esp_err_t storage_save_config(const app_config_t *config)
 {
     if (config == NULL) {
@@ -75,6 +97,11 @@ esp_err_t storage_save_config(const app_config_t *config)
     return err;
 }
 
+/**
+ * @brief 使用默认配置覆盖当前持久化配置。
+ *
+ * @return 成功返回 `ESP_OK`，失败返回对应 ESP-IDF 错误码。
+ */
 esp_err_t storage_reset_config(void)
 {
     return storage_save_config(&DEFAULT_CONFIG);

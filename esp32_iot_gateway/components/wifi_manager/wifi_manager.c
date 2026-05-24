@@ -13,6 +13,16 @@ static const char *TAG = "wifi_manager";
 static bool s_wifi_connected;
 static bool s_wifi_initialized;
 
+/**
+ * @brief 处理 ESP-IDF 的 Wi-Fi 和 IP 事件。
+ *
+ * 该回调会同步更新设备共享状态，并在站点断开后触发重连流程。
+ *
+ * @param arg 用户上下文参数，当前未使用。
+ * @param event_base 事件域，用于区分 Wi-Fi/IP 等不同来源。
+ * @param event_id 具体事件编号。
+ * @param event_data 事件附带的数据，当前未使用。
+ */
 static void wifi_event_handler(void *arg,
                                esp_event_base_t event_base,
                                int32_t event_id,
@@ -23,6 +33,7 @@ static void wifi_event_handler(void *arg,
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         ESP_LOGI(TAG, "wifi station started");
+        /* STA 启动仅表示开始联网流程，尚未真正连上网络。 */
         device_status_update_network(false, false);
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -37,6 +48,11 @@ static void wifi_event_handler(void *arg,
     }
 }
 
+/**
+ * @brief 初始化网络接口、事件循环和 Wi-Fi 驱动状态。
+ *
+ * @return 成功返回 `ESP_OK`，失败返回对应 ESP-IDF 错误码。
+ */
 esp_err_t wifi_manager_init(void)
 {
     s_wifi_connected = false;
@@ -70,6 +86,11 @@ esp_err_t wifi_manager_init(void)
     return ESP_OK;
 }
 
+/**
+ * @brief 读取已保存的 Wi-Fi 配置并启动 Station 模式。
+ *
+ * @return 成功返回 `ESP_OK`，失败返回对应 ESP-IDF 错误码。
+ */
 esp_err_t wifi_manager_start(void)
 {
     app_config_t config;
@@ -79,6 +100,7 @@ esp_err_t wifi_manager_start(void)
     }
 
     wifi_config_t wifi_config = {0};
+    /* 将持久化凭据复制到 ESP-IDF 的 Station 配置结构体中。 */
     strncpy((char *)wifi_config.sta.ssid,
             config.wifi_ssid,
             sizeof(wifi_config.sta.ssid) - 1);
@@ -91,6 +113,11 @@ esp_err_t wifi_manager_start(void)
     return esp_wifi_start();
 }
 
+/**
+ * @brief 返回当前缓存的 Wi-Fi 连接状态。
+ *
+ * @return `true` 表示已连接，`false` 表示未连接。
+ */
 bool wifi_manager_is_connected(void)
 {
     return s_wifi_connected;
