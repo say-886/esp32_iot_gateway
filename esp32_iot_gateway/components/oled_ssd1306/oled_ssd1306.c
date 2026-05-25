@@ -7,6 +7,7 @@
 #include "app_state.h"
 #include "board.h"
 #include "driver/i2c.h"
+#include "esp_check.h"
 #include "esp_log.h"
 
 #define OLED_WIDTH 128

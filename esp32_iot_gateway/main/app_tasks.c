@@ -19,6 +19,8 @@ static const char *TAG = "app_tasks";
 static const uint32_t DISPLAY_UPDATE_PERIOD_MS = 1000;
 static const uint32_t STATUS_LOG_PERIOD_MS = 20000;
 static const uint32_t MQTT_PUBLISH_PERIOD_MS = 5000;
+static const uint32_t SENSOR_ERROR_THRESHOLD = 3;
+static const uint32_t SENSOR_ERROR_LOG_PERIOD = 10;
 
 static uint32_t app_get_sample_period_ms(void)
 {
@@ -77,12 +79,19 @@ static void sensor_task(void *arg)
             if (aht_ret == ESP_OK || bh_ret == ESP_OK) {
                 device_status_update_sensor(temperature, humidity, light);
             }
-            device_status_set_error(aht_ret != ESP_OK ? APP_ERR_AHT20_READ_FAILED : APP_ERR_BH1750_READ_FAILED);
             fail_count++;
-            if (last_read_ok || (fail_count % 10U) == 0U) {
-                ESP_LOGW(TAG, "sensor read degraded: AHT20=%s BH1750=%s (fail_count=%lu)",
+
+            if (fail_count >= SENSOR_ERROR_THRESHOLD) {
+                device_status_set_error(aht_ret != ESP_OK ? APP_ERR_AHT20_READ_FAILED : APP_ERR_BH1750_READ_FAILED);
+            }
+
+            if (last_read_ok ||
+                fail_count == SENSOR_ERROR_THRESHOLD ||
+                (fail_count % SENSOR_ERROR_LOG_PERIOD) == 0U) {
+                ESP_LOGW(TAG, "sensor read degraded: AHT20=%s BH1750=%s (consecutive_fail=%lu threshold=%lu)",
                          esp_err_to_name(aht_ret), esp_err_to_name(bh_ret),
-                         (unsigned long)fail_count);
+                         (unsigned long)fail_count,
+                         (unsigned long)SENSOR_ERROR_THRESHOLD);
             }
             last_read_ok = false;
         }

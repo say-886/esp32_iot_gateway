@@ -5,4 +5,6 @@ idf_component_register(
         "include"
     REQUIRES
         esp_https_ota
+        esp_http_client
+        esp_partition
 )

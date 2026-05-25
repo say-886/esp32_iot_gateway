@@ -7,11 +7,21 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "device_status.h"
+#include "error_code.h"
+#include "mqtt_service.h"
 #include "storage_nvs.h"
 
 static const char *TAG = "wifi_manager";
 static bool s_wifi_connected;
 static bool s_wifi_initialized;
+
+static bool wifi_config_is_placeholder(const app_config_t *config)
+{
+    return config == NULL ||
+           config->wifi_ssid[0] == '\0' ||
+           strcmp(config->wifi_ssid, "YOUR_WIFI_SSID") == 0 ||
+           strcmp(config->wifi_password, "YOUR_WIFI_PASSWORD") == 0;
+}
 
 /**
  * @brief 处理 ESP-IDF 的 Wi-Fi 和 IP 事件。
@@ -38,6 +48,7 @@ static void wifi_event_handler(void *arg,
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_wifi_connected = false;
+        ESP_ERROR_CHECK_WITHOUT_ABORT(mqtt_service_stop());
         device_status_update_network(false, false);
         ESP_LOGW(TAG, "wifi disconnected, retrying");
         esp_wifi_connect();
@@ -45,6 +56,11 @@ static void wifi_event_handler(void *arg,
         s_wifi_connected = true;
         device_status_update_network(true, false);
         ESP_LOGI(TAG, "wifi got ip");
+        esp_err_t err = mqtt_service_start();
+        if (err != ESP_OK) {
+            device_status_set_error(APP_ERR_MQTT_CONNECT_FAILED);
+            ESP_LOGW(TAG, "mqtt start failed after got ip: %s", esp_err_to_name(err));
+        }
     }
 }
 
@@ -97,6 +113,12 @@ esp_err_t wifi_manager_start(void)
     esp_err_t err = storage_load_config(&config);
     if (err != ESP_OK) {
         return err;
+    }
+
+    if (wifi_config_is_placeholder(&config)) {
+        ESP_LOGW(TAG, "WiFi credentials are not configured yet, skip station start");
+        device_status_set_error(APP_ERR_WIFI_CONNECT_FAILED);
+        return ESP_OK;
     }
 
     wifi_config_t wifi_config = {0};

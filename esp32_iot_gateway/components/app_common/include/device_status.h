@@ -73,6 +73,9 @@ void device_status_update_control(const device_cmd_t *cmd);
  */
 void device_status_update_network(bool wifi_connected, bool mqtt_connected);
 
+void device_status_set_state(device_state_t state);
+void device_status_set_error(uint32_t error_code);
+
 /**
  * @brief 增加系统累计运行时长。
  *

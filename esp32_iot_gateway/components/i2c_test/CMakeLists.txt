@@ -1,10 +1,9 @@
 idf_component_register(
     SRCS
-        "mqtt_service.c"
+        "i2c_test.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
-        app_common
-        storage_nvs
-        mqtt
+        board
+        driver
 )

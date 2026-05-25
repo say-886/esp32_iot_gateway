@@ -21,6 +21,16 @@ const labels = {
 
 const history = [];
 const maxHistory = 12;
+const runtime = {
+  demoMode: true,
+  lastDemoLog: ""
+};
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
 
 function nowText() {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -99,7 +109,7 @@ function snapshotHistory() {
   }
 }
 
-function updateFakeSensorData() {
+function updateDemoSensorData() {
   state.uptime += 2;
   state.temperature = Number((26.5 + Math.sin(state.uptime / 12) * 0.8).toFixed(1));
   state.humidity = Number((60.2 + Math.cos(state.uptime / 10) * 1.2).toFixed(1));
@@ -108,6 +118,91 @@ function updateFakeSensorData() {
   state.mqtt = state.uptime >= 8 ? 1 : 0;
   state.device_state = state.mqtt ? "ONLINE" : state.wifi ? "MQTT_CONNECTING" : "WIFI_CONNECTING";
   snapshotHistory();
+}
+
+function applyStatusPayload(payload) {
+  state.temperature = Number(payload.temperature ?? state.temperature);
+  state.humidity = Number(payload.humidity ?? state.humidity);
+  state.light = Number(payload.light ?? state.light);
+  state.led = Number(payload.led ?? state.led);
+  state.buzzer = Number(payload.buzzer ?? state.buzzer);
+  state.relay = Number(payload.relay ?? state.relay);
+  state.wifi = Number(payload.wifi ?? state.wifi);
+  state.mqtt = Number(payload.mqtt ?? state.mqtt);
+  state.uptime = Number(payload.uptime ?? state.uptime);
+  state.error_code = Number(payload.error_code ?? state.error_code);
+  state.firmware = payload.firmware ?? state.firmware;
+  state.device_state = payload.state ?? payload.device_state ?? state.device_state;
+}
+
+async function fetchStatusFromApi() {
+  const response = await fetch("/api/status", {
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const payload = await response.json();
+  applyStatusPayload(payload);
+  snapshotHistory();
+}
+
+async function sendControlToApi(target, value) {
+  const response = await fetch("/api/control", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ [target]: value ? 1 : 0 })
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+}
+
+async function syncControlState(target, expectedValue) {
+  const retryIntervals = [180, 250, 350];
+
+  for (const waitMs of retryIntervals) {
+    await delay(waitMs);
+    await fetchStatusFromApi();
+    if (Number(state[target]) === Number(expectedValue)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function enterDemoMode(reason) {
+  if (runtime.lastDemoLog !== reason) {
+    pushLog("切换到本地演示模式", reason);
+    runtime.lastDemoLog = reason;
+  }
+  runtime.demoMode = true;
+}
+
+async function refreshRuntimeStatus() {
+  try {
+    await fetchStatusFromApi();
+    if (runtime.demoMode) {
+      pushLog("已连接真实设备接口", "前端开始读取 /api/status");
+    }
+    runtime.demoMode = false;
+    runtime.lastDemoLog = "";
+  } catch (error) {
+    enterDemoMode("未检测到可用的 /api/status，继续展示本地演示数据");
+    updateDemoSensorData();
+  }
+
+  if (state.uptime === 4 && runtime.demoMode) {
+    pushLog("Wi-Fi 已连接", "Station 获取连接状态");
+  }
+  if (state.uptime === 8 && runtime.demoMode) {
+    pushLog("MQTT 已连接", "设备状态切换为 ONLINE");
+  }
+
+  render();
 }
 
 function drawTrendChart() {
@@ -268,11 +363,38 @@ function render() {
 }
 
 document.querySelectorAll(".control-button").forEach((button) => {
-  button.addEventListener("click", () => {
+  button.addEventListener("click", async () => {
     const target = button.dataset.target;
-    state[target] = state[target] ? 0 : 1;
+    const nextValue = state[target] ? 0 : 1;
+
+    button.disabled = true;
+
+    if (!runtime.demoMode) {
+      try {
+        await sendControlToApi(target, nextValue);
+        pushLog(`${labels[target]}${nextValue ? "开启" : "关闭"}`, "控制命令已发送到 /api/control");
+        state[target] = nextValue;
+        render();
+
+        const synced = await syncControlState(target, nextValue);
+        runtime.demoMode = false;
+        runtime.lastDemoLog = "";
+        render();
+        if (!synced) {
+          pushLog("状态回读延迟", `${labels[target]}命令已发送，等待设备回传最新状态`);
+        }
+        return;
+      } catch (error) {
+        enterDemoMode("控制接口不可用，已回退到本地演示状态");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    state[target] = nextValue;
     pushLog(`${labels[target]}${state[target] ? "开启" : "关闭"}`, "控制状态已写入本地演示状态");
     render();
+    button.disabled = false;
   });
 });
 
@@ -292,15 +414,7 @@ document.getElementById("clear-log").addEventListener("click", () => {
 
 snapshotHistory();
 pushLog("控制台启动", "加载静态演示数据");
-render();
-
+refreshRuntimeStatus();
 setInterval(() => {
-  updateFakeSensorData();
-  if (state.uptime === 4) {
-    pushLog("Wi-Fi 已连接", "Station 获取连接状态");
-  }
-  if (state.uptime === 8) {
-    pushLog("MQTT 已连接", "设备状态切换为 ONLINE");
-  }
-  render();
+  refreshRuntimeStatus();
 }, 2000);
