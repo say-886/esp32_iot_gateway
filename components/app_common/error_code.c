@@ -1,5 +1,11 @@
 #include "error_code.h"
 
+/**
+ * @brief 将错误码转换为字符串。
+ *
+ * @param code 错误码。
+ * @return 错误码对应的字符串。
+ */
 const char *app_error_code_to_string(app_error_code_t code)
 {
     switch (code) {

@@ -5,17 +5,70 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#if __has_include("storage_nvs_local.h")
+#include "storage_nvs_local.h"
+#endif
+
 #define STORAGE_NAMESPACE "gateway"
 #define STORAGE_KEY_CONFIG "app_config"
 
+#ifndef APP_DEFAULT_WIFI_SSID
+#define APP_DEFAULT_WIFI_SSID "YOUR_WIFI_SSID"
+#endif
+
+#ifndef APP_DEFAULT_WIFI_PASSWORD
+#define APP_DEFAULT_WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+#endif
+
+#ifndef APP_DEFAULT_MQTT_HOST
+#define APP_DEFAULT_MQTT_HOST "broker.emqx.io"
+#endif
+
+#ifndef APP_DEFAULT_MQTT_PORT
+#define APP_DEFAULT_MQTT_PORT 1883
+#endif
+
+#ifndef APP_DEFAULT_DEVICE_ID
+#define APP_DEFAULT_DEVICE_ID "esp32_gateway_001"
+#endif
+
+#ifndef APP_DEFAULT_SAMPLE_PERIOD_MS
+#define APP_DEFAULT_SAMPLE_PERIOD_MS 2000
+#endif
+
 static const app_config_t DEFAULT_CONFIG = {
-    .wifi_ssid = "YOUR_WIFI_SSID",
-    .wifi_password = "YOUR_WIFI_PASSWORD",
-    .mqtt_host = "broker.emqx.io",
-    .mqtt_port = 1883,
-    .device_id = "esp32_gateway_001",
-    .sample_period_ms = 2000,
+    .wifi_ssid = APP_DEFAULT_WIFI_SSID,
+    .wifi_password = APP_DEFAULT_WIFI_PASSWORD,
+    .mqtt_host = APP_DEFAULT_MQTT_HOST,
+    .mqtt_port = APP_DEFAULT_MQTT_PORT,
+    .device_id = APP_DEFAULT_DEVICE_ID,
+    .sample_period_ms = APP_DEFAULT_SAMPLE_PERIOD_MS,
 };
+
+static void storage_sanitize_config(app_config_t *config)
+{
+    if (config == NULL) {
+        return;
+    }
+
+    config->wifi_ssid[sizeof(config->wifi_ssid) - 1] = '\0';
+    config->wifi_password[sizeof(config->wifi_password) - 1] = '\0';
+    config->mqtt_host[sizeof(config->mqtt_host) - 1] = '\0';
+    config->device_id[sizeof(config->device_id) - 1] = '\0';
+
+    if (config->mqtt_host[0] == '\0') {
+        memcpy(config->mqtt_host, DEFAULT_CONFIG.mqtt_host, sizeof(config->mqtt_host));
+    }
+    if (config->mqtt_port == 0) {
+        config->mqtt_port = DEFAULT_CONFIG.mqtt_port;
+    }
+    if (config->device_id[0] == '\0') {
+        memcpy(config->device_id, DEFAULT_CONFIG.device_id, sizeof(config->device_id));
+    }
+    if (config->sample_period_ms < 500 || config->sample_period_ms > 60000) {
+        config->sample_period_ms = DEFAULT_CONFIG.sample_period_ms;
+    }
+}
 
 /**
  * @brief 初始化 NVS Flash，必要时执行擦除恢复。
@@ -67,6 +120,9 @@ esp_err_t storage_load_config(app_config_t *config)
         *config = DEFAULT_CONFIG;
         return ESP_OK;
     }
+    if (err == ESP_OK) {
+        storage_sanitize_config(config);
+    }
     return err;
 }
 
@@ -83,13 +139,16 @@ esp_err_t storage_save_config(const app_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
+    app_config_t sanitized = *config;
+    storage_sanitize_config(&sanitized);
+
     nvs_handle_t handle;
     esp_err_t err = nvs_open(STORAGE_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
         return err;
     }
 
-    err = nvs_set_blob(handle, STORAGE_KEY_CONFIG, config, sizeof(*config));
+    err = nvs_set_blob(handle, STORAGE_KEY_CONFIG, &sanitized, sizeof(sanitized));
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }

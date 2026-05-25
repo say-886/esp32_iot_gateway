@@ -8,6 +8,23 @@
 
 static device_status_t s_status;
 
+static void device_status_restore_state_from_network(void)
+{
+    if (s_status.mqtt_connected) {
+        s_status.state = DEVICE_STATE_ONLINE;
+    } else if (s_status.wifi_connected) {
+        s_status.state = DEVICE_STATE_MQTT_CONNECTING;
+    } else {
+        s_status.state = DEVICE_STATE_WIFI_CONNECTING;
+    }
+}
+
+static bool device_status_is_sensor_error(uint32_t error_code)
+{
+    return error_code == APP_ERR_AHT20_READ_FAILED ||
+           error_code == APP_ERR_BH1750_READ_FAILED;
+}
+
 /**
  * @brief 使用适合演示网关的默认值初始化状态结构体。
  *
@@ -99,13 +116,29 @@ void device_status_update_network(bool wifi_connected, bool mqtt_connected)
     s_status.wifi_connected = wifi_connected;
     s_status.mqtt_connected = mqtt_connected;
 
-    /* 将连接进度映射为统一状态，便于界面和接口直接使用。 */
-    if (mqtt_connected) {
-        s_status.state = DEVICE_STATE_ONLINE;
-    } else if (wifi_connected) {
-        s_status.state = DEVICE_STATE_MQTT_CONNECTING;
+    if (s_status.error_code == APP_ERR_NONE) {
+        /* 无错误时直接映射网络连接进度。 */
+        device_status_restore_state_from_network();
+    } else if (device_status_is_sensor_error(s_status.error_code)) {
+        /* 传感器错误视为可降级运行，保留网络状态并标识为恢复中。 */
+        s_status.state = DEVICE_STATE_RECOVERY;
+    }
+}
+
+void device_status_set_state(device_state_t state)
+{
+    s_status.state = state;
+}
+
+void device_status_set_error(uint32_t error_code)
+{
+    s_status.error_code = error_code;
+    if (error_code == APP_ERR_NONE) {
+        device_status_restore_state_from_network();
+    } else if (device_status_is_sensor_error(error_code)) {
+        s_status.state = DEVICE_STATE_RECOVERY;
     } else {
-        s_status.state = DEVICE_STATE_WIFI_CONNECTING;
+        s_status.state = DEVICE_STATE_ERROR;
     }
 }
 

@@ -3,8 +3,15 @@ idf_component_register(
         "web_server.c"
     INCLUDE_DIRS
         "include"
+    EMBED_TXTFILES
+        "../../web/index.html"
+        "../../web/style.css"
+        "../../web/app.js"
     REQUIRES
         app_common
         app_state
+        ota_service
+        storage_nvs
         esp_http_server
+        esp_system
 )

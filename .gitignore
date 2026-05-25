@@ -6,3 +6,4 @@ managed_components/*
 *.tmp
 datasheets/
 *.pdf
+components/storage_nvs/include/storage_nvs_local.h

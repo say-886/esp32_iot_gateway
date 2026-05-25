@@ -125,6 +125,7 @@ component_name/
 | `/api/config` | GET | 获取当前配置 | 已实现，待联网实测 |
 | `/api/config` | POST | 设置采样周期、MQTT 地址、告警阈值 | 已实现，待联网实测 |
 | `/api/reboot` | POST | 设备重启 | 已实现，待联网实测 |
+| `/api/ota` | POST | 通过 HTTP/HTTPS URL 执行 OTA 升级 | 已实现，待局域网固件升级实测 |
 
 `GET /api/status` 示例：
 
@@ -206,8 +207,22 @@ component_name/
 - `OLED` 代码已接入，但仍需完成实机接线与显示验收。
 - `AHT20` 已从持续失败恢复到可读状态，但还需继续观察长时间稳定性。
 - `GET /api/config`、`POST /api/config`、`POST /api/reboot` 仍建议补一轮完整验收。
-- `OTA` 仍是后续单独实现与验收项。
-- `NVS`、看门狗、异常恢复仍需按场景补充验证。
+- `POST /api/ota` 已接入 HTTP/HTTPS OTA，仍需使用局域网固件文件做一次完整升级验收。
+- `NVS`、看门狗、异常恢复仍需按场景补充长时间验证。
+
+## OTA 分区
+
+当前 `partitions.csv` 已切换为 OTA 分区布局：
+
+| 分区 | 用途 | 大小 |
+| --- | --- | --- |
+| `nvs` | 配置保存 | 16K |
+| `otadata` | OTA 状态数据 | 8K |
+| `phy_init` | RF 参数 | 4K |
+| `ota_0` | 应用分区 A | 1536K |
+| `ota_1` | 应用分区 B | 1536K |
+
+当前固件大小约 1.0MB，仍可放入 1.5MB OTA 分区。
 
 ## 本地私有配置
 

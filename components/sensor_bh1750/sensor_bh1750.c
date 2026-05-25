@@ -1,12 +1,67 @@
 #include "sensor_bh1750.h"
 
+#include <stdint.h>
+
+#include "board.h"
+#include "driver/i2c.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#define BH1750_I2C_PORT I2C_NUM_0
+#define BH1750_ADDR_LOW 0x23
+#define BH1750_ADDR_HIGH 0x5C
+#define BH1750_TIMEOUT_MS 1000
+#define BH1750_CMD_CONT_H_RES 0x10
+
+static uint8_t s_bh1750_addr = BH1750_ADDR_LOW;
+
+static esp_err_t bh1750_probe(uint8_t addr)
+{
+    const uint8_t cmd = BH1750_CMD_CONT_H_RES;
+    return i2c_master_write_to_device(BH1750_I2C_PORT, addr, &cmd, 1,
+                                      pdMS_TO_TICKS(BH1750_TIMEOUT_MS));
+}
+
 esp_err_t bh1750_init(void)
 {
-    return ESP_ERR_NOT_SUPPORTED;
+    esp_err_t ret = bh1750_probe(BH1750_ADDR_LOW);
+    if (ret == ESP_OK) {
+        s_bh1750_addr = BH1750_ADDR_LOW;
+        return ESP_OK;
+    }
+
+    ret = bh1750_probe(BH1750_ADDR_HIGH);
+    if (ret == ESP_OK) {
+        s_bh1750_addr = BH1750_ADDR_HIGH;
+    }
+    return ret;
 }
 
 esp_err_t bh1750_read(float *light_lux)
 {
-    (void)light_lux;
-    return ESP_ERR_NOT_SUPPORTED;
+    if (light_lux == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const uint8_t cmd = BH1750_CMD_CONT_H_RES;
+    esp_err_t ret = i2c_master_write_to_device(BH1750_I2C_PORT, s_bh1750_addr,
+                                               &cmd, 1,
+                                               pdMS_TO_TICKS(BH1750_TIMEOUT_MS));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(180));
+
+    uint8_t data[2] = {0};
+    ret = i2c_master_read_from_device(BH1750_I2C_PORT, s_bh1750_addr,
+                                      data, sizeof(data),
+                                      pdMS_TO_TICKS(BH1750_TIMEOUT_MS));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    uint16_t raw = ((uint16_t)data[0] << 8) | data[1];
+    *light_lux = (float)raw / 1.2f;
+    return ESP_OK;
 }
