@@ -17,6 +17,7 @@
 #define APP_HTTP_API_CONFIG "/api/config"          /* HTTP 配置接口，用于读取或更新运行配置。 */
 #define APP_HTTP_API_REBOOT "/api/reboot"          /* HTTP 重启接口，用于触发设备重启。 */
 #define APP_HTTP_API_OTA "/api/ota"                /* HTTP OTA 接口，用于通过固件 URL 触发升级。 */
+#define APP_HTTP_API_MODBUS "/api/modbus"          /* Modbus RTU 轮询状态接口。 */
 
 #define APP_MQTT_TOPIC_STATUS "esp32/gateway/status"       /* MQTT 设备状态上报主题。 */
 #define APP_MQTT_TOPIC_SENSOR "esp32/gateway/sensor"       /* MQTT 传感器数据上报主题。 */

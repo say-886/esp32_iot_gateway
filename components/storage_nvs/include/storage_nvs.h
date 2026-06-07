@@ -1,6 +1,7 @@
 #ifndef STORAGE_NVS_H
 #define STORAGE_NVS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -10,8 +11,18 @@ typedef struct {
     char wifi_password[64];
     char mqtt_host[64];
     uint16_t mqtt_port;
+    bool mqtt_use_tls;
+    char mqtt_username[32];
+    char mqtt_password[64];
     char device_id[32];
+    char api_token[64];
     uint32_t sample_period_ms;
+    bool modbus_enabled;
+    uint8_t modbus_slave_addr;
+    uint32_t modbus_baud_rate;
+    uint16_t modbus_start_register;
+    uint16_t modbus_register_count;
+    uint32_t modbus_poll_period_ms;
 } app_config_t;
 
 /**

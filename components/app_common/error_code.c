@@ -27,6 +27,8 @@ const char *app_error_code_to_string(app_error_code_t code)
         return "OTA_FAILED";
     case APP_ERR_WATCHDOG:
         return "WATCHDOG";
+    case APP_ERR_MODBUS_READ_FAILED:
+        return "MODBUS_READ_FAILED";
     default:
         return "UNKNOWN";
     }

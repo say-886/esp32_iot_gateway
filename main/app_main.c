@@ -7,7 +7,9 @@
 #include "esp_log.h"
 #include "i2c_test.h"
 #include "mqtt_service.h"
+#include "modbus_service.h"
 #include "oled_ssd1306.h"
+#include "ota_service.h"
 #include "sensor_aht20.h"
 #include "sensor_bh1750.h"
 #include "storage_nvs.h"
@@ -41,12 +43,13 @@ void app_main(void)
     ESP_LOGI(TAG, "Firmware: %s", g_device_status.firmware_version);
     ESP_LOGI(TAG, "Current state: %s",
              app_state_to_string(g_device_status.state));
-    ESP_LOGI(TAG, "HTTP APIs: %s, %s, %s, %s, %s",
+    ESP_LOGI(TAG, "HTTP APIs: %s, %s, %s, %s, %s, %s",
              APP_HTTP_API_STATUS,
              APP_HTTP_API_CONTROL,
              APP_HTTP_API_CONFIG,
              APP_HTTP_API_REBOOT,
-             APP_HTTP_API_OTA);
+             APP_HTTP_API_OTA,
+             APP_HTTP_API_MODBUS);
     ESP_LOGI(TAG, "MQTT topics: %s, %s, %s, %s, %s",
              APP_MQTT_TOPIC_STATUS,
              APP_MQTT_TOPIC_SENSOR,
@@ -93,6 +96,7 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(storage_nvs_init()); // 初始化 NVS 存储（用于存储应用配置和状态快照，如 WiFi 配置、MQTT 主题等）
+    ESP_ERROR_CHECK_WITHOUT_ABORT(modbus_service_init());
 
 #if APP_ENABLE_NETWORK_SERVICES
     ESP_ERROR_CHECK(wifi_manager_init());
@@ -106,4 +110,5 @@ void app_main(void)
 
     /* 平台服务准备完成后，再启动演示任务。 */
     ESP_ERROR_CHECK(app_create_placeholder_tasks());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(ota_service_confirm_running_image());
 }

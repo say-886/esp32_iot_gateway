@@ -11,8 +11,10 @@ idf_component_register(
         device_control
         i2c_test
         mqtt_service
+        modbus_service
         button
         oled_ssd1306
+        ota_service
         sensor_aht20
         sensor_bh1750
         storage_nvs

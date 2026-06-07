@@ -5,6 +5,7 @@
 
 #include "cJSON.h"
 #include "device_status.h"
+#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "mqtt_client.h"
 #include "storage_nvs.h"
@@ -151,7 +152,8 @@ esp_err_t mqtt_service_start(void)
 
     int len = snprintf(s_broker_uri,
                        sizeof(s_broker_uri),
-                       "mqtt://%s:%u",
+                       "%s://%s:%u",
+                       config.mqtt_use_tls ? "mqtts" : "mqtt",
                        config.mqtt_host,
                        (unsigned int)config.mqtt_port);
     if (len < 0 || len >= (int)sizeof(s_broker_uri)) {
@@ -160,7 +162,13 @@ esp_err_t mqtt_service_start(void)
 
     esp_mqtt_client_config_t mqtt_config = {
         .broker.address.uri = s_broker_uri,
+        .broker.verification.crt_bundle_attach =
+            config.mqtt_use_tls ? esp_crt_bundle_attach : NULL,
+        .credentials.username =
+            config.mqtt_username[0] != '\0' ? config.mqtt_username : NULL,
         .credentials.client_id = config.device_id,
+        .credentials.authentication.password =
+            config.mqtt_password[0] != '\0' ? config.mqtt_password : NULL,
     };
 
     s_client = esp_mqtt_client_init(&mqtt_config);
