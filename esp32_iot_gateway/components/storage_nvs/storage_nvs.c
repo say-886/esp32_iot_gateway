@@ -13,9 +13,10 @@
 
 #define STORAGE_NAMESPACE "gateway"
 #define STORAGE_KEY_LEGACY_CONFIG "app_config"
-#define STORAGE_KEY_CONFIG "app_cfg_v2"
+#define STORAGE_KEY_V2_CONFIG "app_cfg_v2"
+#define STORAGE_KEY_CONFIG "app_cfg_v3"
 #define STORAGE_CONFIG_MAGIC 0x47434647U
-#define STORAGE_CONFIG_VERSION 2U
+#define STORAGE_CONFIG_VERSION 3U
 
 #ifndef APP_DEFAULT_WIFI_SSID
 #define APP_DEFAULT_WIFI_SSID "YOUR_WIFI_SSID"
@@ -27,14 +28,60 @@
 #define APP_DEFAULT_MQTT_HOST "broker.emqx.io"
 #endif
 #ifndef APP_DEFAULT_MQTT_PORT
-#define APP_DEFAULT_MQTT_PORT 1883
+#define APP_DEFAULT_MQTT_PORT 8883
+#endif
+#ifndef APP_DEFAULT_MQTT_USE_TLS
+#define APP_DEFAULT_MQTT_USE_TLS false
+#endif
+#ifndef APP_DEFAULT_MQTT_USERNAME
+#define APP_DEFAULT_MQTT_USERNAME ""
+#endif
+#ifndef APP_DEFAULT_MQTT_PASSWORD
+#define APP_DEFAULT_MQTT_PASSWORD ""
 #endif
 #ifndef APP_DEFAULT_DEVICE_ID
 #define APP_DEFAULT_DEVICE_ID "esp32_gateway_001"
 #endif
+#ifndef APP_DEFAULT_API_TOKEN
+#define APP_DEFAULT_API_TOKEN "CHANGE_ME_BEFORE_DEPLOYMENT"
+#endif
 #ifndef APP_DEFAULT_SAMPLE_PERIOD_MS
 #define APP_DEFAULT_SAMPLE_PERIOD_MS 2000
 #endif
+#ifndef APP_DEFAULT_MODBUS_ENABLED
+#define APP_DEFAULT_MODBUS_ENABLED false
+#endif
+#ifndef APP_DEFAULT_MODBUS_SLAVE_ADDR
+#define APP_DEFAULT_MODBUS_SLAVE_ADDR 1
+#endif
+#ifndef APP_DEFAULT_MODBUS_BAUD_RATE
+#define APP_DEFAULT_MODBUS_BAUD_RATE 9600
+#endif
+#ifndef APP_DEFAULT_MODBUS_START_REGISTER
+#define APP_DEFAULT_MODBUS_START_REGISTER 0
+#endif
+#ifndef APP_DEFAULT_MODBUS_REGISTER_COUNT
+#define APP_DEFAULT_MODBUS_REGISTER_COUNT 4
+#endif
+#ifndef APP_DEFAULT_MODBUS_POLL_PERIOD_MS
+#define APP_DEFAULT_MODBUS_POLL_PERIOD_MS 5000
+#endif
+
+typedef struct {
+    char wifi_ssid[32];
+    char wifi_password[64];
+    char mqtt_host[64];
+    uint16_t mqtt_port;
+    char device_id[32];
+    uint32_t sample_period_ms;
+} app_config_v2_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t config_size;
+    app_config_v2_t config;
+} storage_config_record_v2_t;
 
 typedef struct {
     uint32_t magic;
@@ -48,8 +95,18 @@ static const app_config_t DEFAULT_CONFIG = {
     .wifi_password = APP_DEFAULT_WIFI_PASSWORD,
     .mqtt_host = APP_DEFAULT_MQTT_HOST,
     .mqtt_port = APP_DEFAULT_MQTT_PORT,
+    .mqtt_use_tls = APP_DEFAULT_MQTT_USE_TLS,
+    .mqtt_username = APP_DEFAULT_MQTT_USERNAME,
+    .mqtt_password = APP_DEFAULT_MQTT_PASSWORD,
     .device_id = APP_DEFAULT_DEVICE_ID,
+    .api_token = APP_DEFAULT_API_TOKEN,
     .sample_period_ms = APP_DEFAULT_SAMPLE_PERIOD_MS,
+    .modbus_enabled = APP_DEFAULT_MODBUS_ENABLED,
+    .modbus_slave_addr = APP_DEFAULT_MODBUS_SLAVE_ADDR,
+    .modbus_baud_rate = APP_DEFAULT_MODBUS_BAUD_RATE,
+    .modbus_start_register = APP_DEFAULT_MODBUS_START_REGISTER,
+    .modbus_register_count = APP_DEFAULT_MODBUS_REGISTER_COUNT,
+    .modbus_poll_period_ms = APP_DEFAULT_MODBUS_POLL_PERIOD_MS,
 };
 
 static app_config_t s_cached_config;
@@ -75,7 +132,10 @@ static void sanitize_config(app_config_t *config)
     config->wifi_ssid[sizeof(config->wifi_ssid) - 1] = '\0';
     config->wifi_password[sizeof(config->wifi_password) - 1] = '\0';
     config->mqtt_host[sizeof(config->mqtt_host) - 1] = '\0';
+    config->mqtt_username[sizeof(config->mqtt_username) - 1] = '\0';
+    config->mqtt_password[sizeof(config->mqtt_password) - 1] = '\0';
     config->device_id[sizeof(config->device_id) - 1] = '\0';
+    config->api_token[sizeof(config->api_token) - 1] = '\0';
 
     if (config->mqtt_host[0] == '\0') {
         memcpy(config->mqtt_host, DEFAULT_CONFIG.mqtt_host, sizeof(config->mqtt_host));
@@ -89,6 +149,18 @@ static void sanitize_config(app_config_t *config)
     if (config->sample_period_ms < 500 || config->sample_period_ms > 60000) {
         config->sample_period_ms = DEFAULT_CONFIG.sample_period_ms;
     }
+    if (config->modbus_slave_addr == 0 || config->modbus_slave_addr > 247) {
+        config->modbus_slave_addr = DEFAULT_CONFIG.modbus_slave_addr;
+    }
+    if (config->modbus_baud_rate < 1200 || config->modbus_baud_rate > 1000000) {
+        config->modbus_baud_rate = DEFAULT_CONFIG.modbus_baud_rate;
+    }
+    if (config->modbus_register_count == 0 || config->modbus_register_count > 16) {
+        config->modbus_register_count = DEFAULT_CONFIG.modbus_register_count;
+    }
+    if (config->modbus_poll_period_ms < 500 || config->modbus_poll_period_ms > 60000) {
+        config->modbus_poll_period_ms = DEFAULT_CONFIG.modbus_poll_period_ms;
+    }
 }
 
 esp_err_t storage_validate_config(const app_config_t *config)
@@ -98,7 +170,12 @@ esp_err_t storage_validate_config(const app_config_t *config)
     }
     if (config->mqtt_host[0] == '\0' || config->mqtt_port == 0 ||
         config->device_id[0] == '\0' ||
-        config->sample_period_ms < 500 || config->sample_period_ms > 60000) {
+        config->api_token[0] == '\0' ||
+        config->sample_period_ms < 500 || config->sample_period_ms > 60000 ||
+        config->modbus_slave_addr == 0 || config->modbus_slave_addr > 247 ||
+        config->modbus_baud_rate < 1200 || config->modbus_baud_rate > 1000000 ||
+        config->modbus_register_count == 0 || config->modbus_register_count > 16 ||
+        config->modbus_poll_period_ms < 500 || config->modbus_poll_period_ms > 60000) {
         return ESP_ERR_INVALID_ARG;
     }
     return ESP_OK;
@@ -125,11 +202,36 @@ static esp_err_t load_from_nvs(app_config_t *config)
         record.config_size == sizeof(app_config_t)) {
         *config = record.config;
     } else {
-        size = sizeof(*config);
-        err = nvs_get_blob(handle, STORAGE_KEY_LEGACY_CONFIG, config, &size);
-        if (err == ESP_ERR_NVS_NOT_FOUND) {
+        storage_config_record_v2_t record_v2 = {0};
+        size = sizeof(record_v2);
+        err = nvs_get_blob(handle, STORAGE_KEY_V2_CONFIG, &record_v2, &size);
+        if (err == ESP_OK && size == sizeof(record_v2) &&
+            record_v2.magic == STORAGE_CONFIG_MAGIC &&
+            record_v2.version == 2U &&
+            record_v2.config_size == sizeof(app_config_v2_t)) {
             *config = DEFAULT_CONFIG;
-            err = ESP_OK;
+            memcpy(config->wifi_ssid, record_v2.config.wifi_ssid, sizeof(record_v2.config.wifi_ssid));
+            memcpy(config->wifi_password, record_v2.config.wifi_password, sizeof(record_v2.config.wifi_password));
+            memcpy(config->mqtt_host, record_v2.config.mqtt_host, sizeof(record_v2.config.mqtt_host));
+            config->mqtt_port = record_v2.config.mqtt_port;
+            memcpy(config->device_id, record_v2.config.device_id, sizeof(record_v2.config.device_id));
+            config->sample_period_ms = record_v2.config.sample_period_ms;
+        } else {
+            app_config_v2_t legacy = {0};
+            size = sizeof(legacy);
+            err = nvs_get_blob(handle, STORAGE_KEY_LEGACY_CONFIG, &legacy, &size);
+            if (err == ESP_OK && size == sizeof(legacy)) {
+                *config = DEFAULT_CONFIG;
+                memcpy(config->wifi_ssid, legacy.wifi_ssid, sizeof(legacy.wifi_ssid));
+                memcpy(config->wifi_password, legacy.wifi_password, sizeof(legacy.wifi_password));
+                memcpy(config->mqtt_host, legacy.mqtt_host, sizeof(legacy.mqtt_host));
+                config->mqtt_port = legacy.mqtt_port;
+                memcpy(config->device_id, legacy.device_id, sizeof(legacy.device_id));
+                config->sample_period_ms = legacy.sample_period_ms;
+            } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+                *config = DEFAULT_CONFIG;
+                err = ESP_OK;
+            }
         }
     }
     nvs_close(handle);

@@ -8,11 +8,13 @@
 #include "app_state.h"
 #include "cJSON.h"
 #include "device_status.h"
+#include "error_code.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "modbus_service.h"
 #include "ota_service.h"
 #include "storage_nvs.h"
 
@@ -23,6 +25,49 @@ static volatile bool s_ota_running;
 typedef struct {
     char url[192];
 } ota_task_context_t;
+
+static bool constant_time_equal(const char *left, const char *right)
+{
+    size_t left_len = strlen(left);
+    size_t right_len = strlen(right);
+    size_t max_len = left_len > right_len ? left_len : right_len;
+    unsigned char difference = (unsigned char)(left_len ^ right_len);
+
+    for (size_t i = 0; i < max_len; ++i) {
+        unsigned char left_value = i < left_len ? (unsigned char)left[i] : 0U;
+        unsigned char right_value = i < right_len ? (unsigned char)right[i] : 0U;
+        difference |= left_value ^ right_value;
+    }
+    return difference == 0U;
+}
+
+static esp_err_t require_api_auth(httpd_req_t *req)
+{
+    app_config_t config;
+    if (storage_load_config(&config) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load auth config failed");
+        return ESP_FAIL;
+    }
+
+    size_t header_len = httpd_req_get_hdr_value_len(req, "Authorization");
+    char authorization[96] = {0};
+    bool authorized = header_len > 7 && header_len < sizeof(authorization) &&
+                      httpd_req_get_hdr_value_str(req,
+                                                  "Authorization",
+                                                  authorization,
+                                                  sizeof(authorization)) == ESP_OK &&
+                      strncmp(authorization, "Bearer ", 7) == 0 &&
+                      constant_time_equal(authorization + 7, config.api_token);
+    if (authorized) {
+        return ESP_OK;
+    }
+
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unauthorized\"}");
+    return ESP_ERR_INVALID_STATE;
+}
 
 static void ota_upgrade_task(void *arg)
 {
@@ -170,6 +215,19 @@ static bool json_copy_optional_u16(const cJSON *root, const char *key, uint16_t 
     return true;
 }
 
+static bool json_copy_optional_u16_allow_zero(const cJSON *root, const char *key, uint16_t *out)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (item == NULL) {
+        return true;
+    }
+    if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble > 65535) {
+        return false;
+    }
+    *out = (uint16_t)item->valueint;
+    return true;
+}
+
 static bool json_copy_optional_u32(const cJSON *root, const char *key, uint32_t *out)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
@@ -217,6 +275,10 @@ static esp_err_t status_handler(httpd_req_t *req)
 
 static esp_err_t control_handler(httpd_req_t *req)
 {
+    if (require_api_auth(req) != ESP_OK) {
+        return ESP_OK;
+    }
+
     char body[128] = {0};
     if (receive_request_body(req, body, sizeof(body)) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body size");
@@ -253,22 +315,38 @@ static esp_err_t control_handler(httpd_req_t *req)
 
 static esp_err_t config_get_handler(httpd_req_t *req)
 {
+    if (require_api_auth(req) != ESP_OK) {
+        return ESP_OK;
+    }
+
     app_config_t config;
     esp_err_t err = storage_load_config(&config);
     if (err != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load config failed");
     }
 
-    char response[384];
+    char response[768];
     int len = snprintf(response,
                        sizeof(response),
                        "{\"wifi_ssid\":\"%s\",\"mqtt_host\":\"%s\",\"mqtt_port\":%u,"
-                       "\"device_id\":\"%s\",\"sample_period_ms\":%lu}",
+                       "\"mqtt_use_tls\":%s,\"mqtt_username\":\"%s\","
+                       "\"device_id\":\"%s\",\"sample_period_ms\":%lu,"
+                       "\"modbus_enabled\":%s,\"modbus_slave_addr\":%u,"
+                       "\"modbus_baud_rate\":%lu,\"modbus_start_register\":%u,"
+                       "\"modbus_register_count\":%u,\"modbus_poll_period_ms\":%lu}",
                        config.wifi_ssid,
                        config.mqtt_host,
                        (unsigned int)config.mqtt_port,
+                       config.mqtt_use_tls ? "true" : "false",
+                       config.mqtt_username,
                        config.device_id,
-                       (unsigned long)config.sample_period_ms);
+                       (unsigned long)config.sample_period_ms,
+                       config.modbus_enabled ? "true" : "false",
+                       (unsigned int)config.modbus_slave_addr,
+                       (unsigned long)config.modbus_baud_rate,
+                       (unsigned int)config.modbus_start_register,
+                       (unsigned int)config.modbus_register_count,
+                       (unsigned long)config.modbus_poll_period_ms);
     if (len < 0 || len >= (int)sizeof(response)) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "config response overflow");
     }
@@ -279,7 +357,11 @@ static esp_err_t config_get_handler(httpd_req_t *req)
 
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
-    char body[384] = {0};
+    if (require_api_auth(req) != ESP_OK) {
+        return ESP_OK;
+    }
+
+    char body[1024] = {0};
     if (receive_request_body(req, body, sizeof(body)) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body size");
     }
@@ -291,14 +373,30 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     }
 
     cJSON *root = cJSON_Parse(body);
+    bool mqtt_use_tls_present = false;
+    bool modbus_enabled_present = false;
     bool valid = root != NULL && cJSON_IsObject(root) &&
                  json_copy_optional_string(root, "wifi_ssid", config.wifi_ssid, sizeof(config.wifi_ssid)) &&
                  json_copy_optional_string(root, "wifi_password", config.wifi_password, sizeof(config.wifi_password)) &&
                  json_copy_optional_string(root, "mqtt_host", config.mqtt_host, sizeof(config.mqtt_host)) &&
                  json_copy_optional_u16(root, "mqtt_port", &config.mqtt_port) &&
+                 json_get_bool(root, "mqtt_use_tls", &mqtt_use_tls_present, &config.mqtt_use_tls) &&
+                 json_copy_optional_string(root, "mqtt_username", config.mqtt_username, sizeof(config.mqtt_username)) &&
+                 json_copy_optional_string(root, "mqtt_password", config.mqtt_password, sizeof(config.mqtt_password)) &&
                  json_copy_optional_string(root, "device_id", config.device_id, sizeof(config.device_id)) &&
+                 json_copy_optional_string(root, "api_token", config.api_token, sizeof(config.api_token)) &&
                  json_copy_optional_u32(root, "sample_period_ms", &config.sample_period_ms) &&
+                 json_get_bool(root, "modbus_enabled", &modbus_enabled_present, &config.modbus_enabled) &&
+                 json_copy_optional_u16_allow_zero(root, "modbus_start_register", &config.modbus_start_register) &&
+                 json_copy_optional_u16(root, "modbus_register_count", &config.modbus_register_count) &&
+                 json_copy_optional_u32(root, "modbus_baud_rate", &config.modbus_baud_rate) &&
+                 json_copy_optional_u32(root, "modbus_poll_period_ms", &config.modbus_poll_period_ms) &&
                  storage_validate_config(&config) == ESP_OK;
+    uint16_t slave_addr = config.modbus_slave_addr;
+    if (valid) {
+        valid = json_copy_optional_u16(root, "modbus_slave_addr", &slave_addr) && slave_addr <= 247;
+        config.modbus_slave_addr = (uint8_t)slave_addr;
+    }
     cJSON_Delete(root);
     if (!valid) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid config payload");
@@ -315,6 +413,10 @@ static esp_err_t config_post_handler(httpd_req_t *req)
 
 static esp_err_t reboot_handler(httpd_req_t *req)
 {
+    if (require_api_auth(req) != ESP_OK) {
+        return ESP_OK;
+    }
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true,\"rebooting\":true}");
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -322,8 +424,62 @@ static esp_err_t reboot_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t modbus_status_handler(httpd_req_t *req)
+{
+    if (require_api_auth(req) != ESP_OK) {
+        return ESP_OK;
+    }
+
+    modbus_service_status_t status;
+    modbus_service_get_status(&status);
+    char response[512];
+    int len = snprintf(response,
+                       sizeof(response),
+                       "{\"enabled\":%s,\"online\":%s,\"slave_addr\":%u,"
+                       "\"start_register\":%u,\"register_count\":%u,"
+                       "\"success_count\":%lu,\"error_count\":%lu,"
+                       "\"consecutive_failures\":%lu,\"last_error\":%ld,\"registers\":[",
+                       status.enabled ? "true" : "false",
+                       status.online ? "true" : "false",
+                       status.slave_addr,
+                       status.start_register,
+                       status.register_count,
+                       (unsigned long)status.success_count,
+                       (unsigned long)status.error_count,
+                       (unsigned long)status.consecutive_failures,
+                       (long)status.last_error);
+    if (len < 0 || len >= (int)sizeof(response)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "modbus response overflow");
+    }
+
+    for (uint16_t i = 0; i < status.register_count; ++i) {
+        int appended = snprintf(response + len,
+                                sizeof(response) - (size_t)len,
+                                "%s%u",
+                                i == 0 ? "" : ",",
+                                status.registers[i]);
+        if (appended < 0 || appended >= (int)(sizeof(response) - (size_t)len)) {
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "modbus response overflow");
+        }
+        len += appended;
+    }
+    if (len + 2 >= (int)sizeof(response)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "modbus response overflow");
+    }
+    response[len++] = ']';
+    response[len++] = '}';
+    response[len] = '\0';
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, response, len);
+}
+
 static esp_err_t ota_handler(httpd_req_t *req)
 {
+    if (require_api_auth(req) != ESP_OK) {
+        return ESP_OK;
+    }
+
     char body[256] = {0};
     char url[192] = {0};
     if (receive_request_body(req, body, sizeof(body)) != ESP_OK) {
@@ -372,7 +528,7 @@ esp_err_t web_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 11;
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
         return err;
@@ -438,6 +594,12 @@ esp_err_t web_server_start(void)
         .handler = ota_handler,
         .user_ctx = NULL,
     };
+    httpd_uri_t modbus_uri = {
+        .uri = "/api/modbus",
+        .method = HTTP_GET,
+        .handler = modbus_status_handler,
+        .user_ctx = NULL,
+    };
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &index_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &index_html_uri));
@@ -449,6 +611,7 @@ esp_err_t web_server_start(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &config_post_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &reboot_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &ota_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &modbus_uri));
     ESP_LOGI(TAG, "HTTP API started");
     return ESP_OK;
 }

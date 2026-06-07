@@ -1,12 +1,12 @@
 idf_component_register(
     SRCS
-        "mqtt_service.c"
+        "modbus_service.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
         app_common
+        board
         storage_nvs
-        mqtt
-        mbedtls
-        json
+        driver
+        freertos
 )

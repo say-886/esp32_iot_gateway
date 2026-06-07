@@ -2,6 +2,7 @@
 #define BOARD_H
 
 #include "driver/i2c.h"
+#include "driver/uart.h"
 #include "esp_err.h"
 #include "hal/gpio_types.h"
 
@@ -24,6 +25,10 @@
 #define BOARD_BUTTON_2_GPIO GPIO_NUM_14
 #define BOARD_BUTTON_3_GPIO GPIO_NUM_32
 #define BOARD_BUTTON_4_GPIO GPIO_NUM_33
+#define BOARD_RS485_UART UART_NUM_2
+#define BOARD_RS485_TX_GPIO GPIO_NUM_17
+#define BOARD_RS485_RX_GPIO GPIO_NUM_16
+#define BOARD_RS485_RTS_GPIO GPIO_NUM_4
 
 #define BOARD_OUTPUT_GPIO_MASK ((1ULL << BOARD_LED_GPIO) | \
                                 (1ULL << BOARD_BUZZER_GPIO) | \

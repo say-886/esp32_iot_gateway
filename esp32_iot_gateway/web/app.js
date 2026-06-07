@@ -23,7 +23,8 @@ const history = [];
 const maxHistory = 12;
 const runtime = {
   demoMode: true,
-  lastDemoLog: ""
+  lastDemoLog: "",
+  apiToken: window.localStorage.getItem("gateway_api_token") || ""
 };
 
 function delay(ms) {
@@ -148,14 +149,25 @@ async function fetchStatusFromApi() {
 }
 
 async function sendControlToApi(target, value) {
+  if (!runtime.apiToken) {
+    runtime.apiToken = window.prompt("请输入设备 API Token") || "";
+    if (runtime.apiToken) {
+      window.localStorage.setItem("gateway_api_token", runtime.apiToken);
+    }
+  }
   const response = await fetch("/api/control", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${runtime.apiToken}`
     },
     body: JSON.stringify({ [target]: value ? 1 : 0 })
   });
   if (!response.ok) {
+    if (response.status === 401) {
+      runtime.apiToken = "";
+      window.localStorage.removeItem("gateway_api_token");
+    }
     throw new Error(`HTTP ${response.status}`);
   }
 }
