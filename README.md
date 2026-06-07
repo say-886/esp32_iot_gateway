@@ -19,6 +19,10 @@
 | OLED | 已接入 SSD1306 驱动 | 启动时自动探测 `0x3C/0x3D`，在显示任务中刷新状态 |
 | 降级运行 | 已支持 | AHT20 异常时仍可继续验证 WiFi、Web API、MQTT 与 GPIO 控制 |
 
+## 学习路线
+
+如果只具备 STM32 与 FreeRTOS 基础，建议先阅读 `docs/learning_route.md`。该文档按当前代码实际入口整理了学习顺序，包括 `app_main()`、FreeRTOS 任务、GPIO/I2C、WiFi/Web API/MQTT、NVS、看门狗和 OTA，并附带 7 天学习计划、每日问题汇总模板、简历写法与面试问题清单。
+
 ## 硬件清单
 
 | 序号 | 硬件名称 | 作用 | 备注 |

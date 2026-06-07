@@ -3,93 +3,79 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "cJSON.h"
 #include "device_status.h"
 #include "esp_log.h"
 #include "mqtt_client.h"
 #include "storage_nvs.h"
 
 static const char *TAG = "mqtt_service";
-static const char *MQTT_TOPIC_STATUS = "esp32/gateway/status";
-static const char *MQTT_TOPIC_SENSOR = "esp32/gateway/sensor";
-static const char *MQTT_TOPIC_HEARTBEAT = "esp32/gateway/heartbeat";
-static const char *MQTT_TOPIC_CMD = "esp32/gateway/cmd";
-static const char *MQTT_TOPIC_ERROR = "esp32/gateway/error";
+static const char *MQTT_TOPIC_STATUS = "esp32/gateway/status";      /**< 状态发布主题 */
+static const char *MQTT_TOPIC_SENSOR = "esp32/gateway/sensor";      /**< 传感器数据发布主题 */
+static const char *MQTT_TOPIC_HEARTBEAT = "esp32/gateway/heartbeat"; /**< 心跳发布主题 */
+static const char *MQTT_TOPIC_CMD = "esp32/gateway/cmd";             /**< 控制命令订阅主题 */
+static const char *MQTT_TOPIC_ERROR = "esp32/gateway/error";         /**< 错误发布主题 */
 
 static esp_mqtt_client_handle_t s_client;
 static char s_broker_uri[96];
 
-static bool payload_has_key(const char *body, int len, const char *key)
+/**
+ * @brief 检查 MQTT 消息体中是否包含指定的 JSON 键。
+ * 
+ * @param body 消息体字符串。
+ * @param len 消息体长度。
+ * @param key 待查找的键（带双引号，如 "\"led\""）。
+ * @return true 包含该键。
+ * @return false 不包含该键。
+ */
+static bool json_get_bool(const cJSON *root, const char *key, bool *present, bool *value)
 {
-    return body != NULL && len > 0 && strstr(body, key) != NULL;
-}
-
-static bool payload_parse_bool_value(const char *body, int len, const char *key, bool *out_value)
-{
-    const char *pos = NULL;
-
-    if (body == NULL || len <= 0 || out_value == NULL) {
-        return false;
-    }
-
-    pos = strstr(body, key);
-    if (pos == NULL) {
-        return false;
-    }
-
-    pos = strchr(pos, ':');
-    if (pos == NULL) {
-        return false;
-    }
-
-    pos++;
-    while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
-        pos++;
-    }
-
-    if (*pos == '1' || strncmp(pos, "true", 4) == 0) {
-        *out_value = true;
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    *present = item != NULL;
+    if (item == NULL) {
         return true;
     }
-    if (*pos == '0' || strncmp(pos, "false", 5) == 0) {
-        *out_value = false;
+    if (cJSON_IsBool(item)) {
+        *value = cJSON_IsTrue(item);
         return true;
     }
-
+    if (cJSON_IsNumber(item) && (item->valueint == 0 || item->valueint == 1)) {
+        *value = item->valueint == 1;
+        return true;
+    }
     return false;
 }
 
-static void apply_control_payload(const char *body, int len)
+static bool apply_control_payload(const char *body, int len)
 {
-    char payload[160] = {0};
-    if (body == NULL || len <= 0) {
-        return;
-    }
-    if (len >= (int)sizeof(payload)) {
-        len = sizeof(payload) - 1;
-    }
-    memcpy(payload, body, len);
-    payload[len] = '\0';
-
-    device_cmd_t cmd = {
-        .led_set = payload_has_key(payload, len, "\"led\""),
-        .buzzer_set = payload_has_key(payload, len, "\"buzzer\""),
-        .relay_set = payload_has_key(payload, len, "\"relay\""),
-    };
-
-    if (cmd.led_set && !payload_parse_bool_value(payload, len, "\"led\"", &cmd.led_value)) {
-        cmd.led_set = false;
-    }
-    if (cmd.buzzer_set && !payload_parse_bool_value(payload, len, "\"buzzer\"", &cmd.buzzer_value)) {
-        cmd.buzzer_set = false;
-    }
-    if (cmd.relay_set && !payload_parse_bool_value(payload, len, "\"relay\"", &cmd.relay_value)) {
-        cmd.relay_set = false;
+    if (body == NULL || len <= 0 || len > 512) {
+        return false;
     }
 
-    ESP_LOGI(TAG, "MQTT command payload: %s", payload);
-    device_status_update_control(&cmd);
+    cJSON *root = cJSON_ParseWithLength(body, len);
+    if (root == NULL || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    device_cmd_t cmd = {0};
+    bool valid = json_get_bool(root, "led", &cmd.led_set, &cmd.led_value) &&
+                 json_get_bool(root, "buzzer", &cmd.buzzer_set, &cmd.buzzer_value) &&
+                 json_get_bool(root, "relay", &cmd.relay_set, &cmd.relay_value) &&
+                 (cmd.led_set || cmd.buzzer_set || cmd.relay_set);
+
+    if (valid) {
+        device_status_update_control(&cmd);
+    }
+    cJSON_Delete(root);
+    return valid;
 }
 
+/**
+ * @brief MQTT 事件处理回调函数。
+ * 
+ * 处理连接成功、断开连接、收到数据和错误等事件。
+ */
 static void mqtt_event_handler(void *handler_args,
                                esp_event_base_t base,
                                int32_t event_id,
@@ -113,8 +99,11 @@ static void mqtt_event_handler(void *handler_args,
     case MQTT_EVENT_DATA:
         if (event->topic_len == (int)strlen(MQTT_TOPIC_CMD) &&
             strncmp(event->topic, MQTT_TOPIC_CMD, event->topic_len) == 0) {
-            apply_control_payload(event->data, event->data_len);
-            ESP_LOGI(TAG, "MQTT command applied");
+            if (apply_control_payload(event->data, event->data_len)) {
+                ESP_LOGI(TAG, "MQTT command applied");
+            } else {
+                ESP_LOGW(TAG, "invalid MQTT command payload");
+            }
         }
         break;
     case MQTT_EVENT_ERROR:
@@ -125,6 +114,14 @@ static void mqtt_event_handler(void *handler_args,
     }
 }
 
+/**
+ * @brief 内部辅助函数：发布 MQTT 消息。
+ * 
+ * @param topic 发布的主题。
+ * @param payload 消息内容。
+ * @param len 内容长度。
+ * @return esp_err_t ESP_OK 成功。
+ */
 static esp_err_t mqtt_publish(const char *topic, const char *payload, int len)
 {
     if (s_client == NULL || topic == NULL || payload == NULL || len <= 0) {
@@ -135,6 +132,11 @@ static esp_err_t mqtt_publish(const char *topic, const char *payload, int len)
     return msg_id >= 0 ? ESP_OK : ESP_FAIL;
 }
 
+/**
+ * @brief 启动 MQTT 客户端并连接到 Broker。
+ * 
+ * @return esp_err_t ESP_OK 成功。
+ */
 esp_err_t mqtt_service_start(void)
 {
     if (s_client != NULL) {
@@ -181,6 +183,11 @@ esp_err_t mqtt_service_start(void)
     return ESP_OK;
 }
 
+/**
+ * @brief 停止 MQTT 客户端并清理资源。
+ * 
+ * @return esp_err_t ESP_OK 成功。
+ */
 esp_err_t mqtt_service_stop(void)
 {
     if (s_client == NULL) {
@@ -194,6 +201,12 @@ esp_err_t mqtt_service_stop(void)
     return err;
 }
 
+/**
+ * @brief 发布完整的设备状态 JSON 消息。
+ * 
+ * @param status 状态数据源。
+ * @return esp_err_t ESP_OK 成功。
+ */
 esp_err_t mqtt_service_publish_status(const device_status_t *status)
 {
     if (s_client == NULL || status == NULL) {
@@ -205,7 +218,7 @@ esp_err_t mqtt_service_publish_status(const device_status_t *status)
                        sizeof(payload),
                        "{\"temperature\":%.2f,\"humidity\":%.2f,\"light\":%.2f,"
                        "\"led\":%d,\"buzzer\":%d,\"relay\":%d,"
-                       "\"wifi\":%d,\"mqtt\":%d,\"uptime\":%lu,\"error_code\":%lu}",
+                       "\"wifi\":%d,\"mqtt\":%d,\"uptime\":%lu,\"error_code\":%lu,\"error_flags\":%lu}",
                        status->temperature,
                        status->humidity,
                        status->light,
@@ -215,7 +228,8 @@ esp_err_t mqtt_service_publish_status(const device_status_t *status)
                        status->wifi_connected ? 1 : 0,
                        status->mqtt_connected ? 1 : 0,
                        (unsigned long)status->uptime_sec,
-                       (unsigned long)status->error_code);
+                       (unsigned long)status->error_code,
+                       (unsigned long)status->error_flags);
     if (len < 0 || len >= (int)sizeof(payload)) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -223,6 +237,12 @@ esp_err_t mqtt_service_publish_status(const device_status_t *status)
     return mqtt_publish(MQTT_TOPIC_STATUS, payload, len);
 }
 
+/**
+ * @brief 发布简化的传感器 JSON 消息（温湿度、光照）。
+ * 
+ * @param status 状态数据源。
+ * @return esp_err_t ESP_OK 成功。
+ */
 esp_err_t mqtt_service_publish_sensor(const device_status_t *status)
 {
     if (s_client == NULL || status == NULL) {
@@ -243,6 +263,12 @@ esp_err_t mqtt_service_publish_sensor(const device_status_t *status)
     return mqtt_publish(MQTT_TOPIC_SENSOR, payload, len);
 }
 
+/**
+ * @brief 发布系统心跳 JSON 消息。
+ * 
+ * @param status 状态数据源。
+ * @return esp_err_t ESP_OK 成功。
+ */
 esp_err_t mqtt_service_publish_heartbeat(const device_status_t *status)
 {
     if (s_client == NULL || status == NULL) {
@@ -264,6 +290,12 @@ esp_err_t mqtt_service_publish_heartbeat(const device_status_t *status)
     return mqtt_publish(MQTT_TOPIC_HEARTBEAT, payload, len);
 }
 
+/**
+ * @brief 发布错误状态 JSON 消息。
+ * 
+ * @param status 状态数据源。
+ * @return esp_err_t ESP_OK 成功。
+ */
 esp_err_t mqtt_service_publish_error(const device_status_t *status)
 {
     if (s_client == NULL || status == NULL) {
@@ -273,8 +305,9 @@ esp_err_t mqtt_service_publish_error(const device_status_t *status)
     char payload[192];
     int len = snprintf(payload,
                        sizeof(payload),
-                       "{\"error_code\":%lu,\"uptime\":%lu}",
+                       "{\"error_code\":%lu,\"error_flags\":%lu,\"uptime\":%lu}",
                        (unsigned long)status->error_code,
+                       (unsigned long)status->error_flags,
                        (unsigned long)status->uptime_sec);
     if (len < 0 || len >= (int)sizeof(payload)) {
         return ESP_ERR_INVALID_SIZE;

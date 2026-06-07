@@ -7,4 +7,5 @@ idf_component_register(
         app_common
         storage_nvs
         mqtt
+        json
 )

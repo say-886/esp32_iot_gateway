@@ -7,13 +7,15 @@
 #include "esp_timer.h"
 
 #define BUTTON_LONG_PRESS_MS 1000
+#define BUTTON_DEBOUNCE_MS 30
 
 typedef struct {
     gpio_num_t gpio;
-    bool stable_pressed;
-    bool last_raw_pressed;
-    int64_t pressed_at_ms;
-    bool long_reported;
+    bool stable_pressed;     // 稳定按下状态
+    bool last_raw_pressed;   // 上一次原始按下状态
+    int64_t raw_changed_at_ms;
+    int64_t pressed_at_ms;   // 按下时间戳（毫秒）
+    bool long_reported;     // 是否已报告长按事件
 } button_runtime_t;
 
 static button_runtime_t s_buttons[BUTTON_ID_MAX] = {
@@ -31,11 +33,11 @@ static int64_t button_now_ms(void)
 esp_err_t button_init(void)
 {
     gpio_config_t config = {
-        .pin_bit_mask = BOARD_BUTTON_GPIO_MASK,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+        .pin_bit_mask = BOARD_BUTTON_GPIO_MASK, // 配置按键 GPIO 为输入模式
+        .mode = GPIO_MODE_INPUT,                // 输入模式
+        .pull_up_en = GPIO_PULLUP_ENABLE,        // 使能上拉电阻
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,   // 禁用下拉电阻
+        .intr_type = GPIO_INTR_DISABLE,          // 禁用中断
     };
 
     esp_err_t ret = gpio_config(&config);
@@ -47,6 +49,7 @@ esp_err_t button_init(void)
         s_buttons[i].stable_pressed = false;
         s_buttons[i].last_raw_pressed = false;
         s_buttons[i].pressed_at_ms = 0;
+        s_buttons[i].raw_changed_at_ms = button_now_ms();
         s_buttons[i].long_reported = false;
     }
     return ESP_OK;
@@ -62,31 +65,32 @@ button_event_t button_scan_key(button_id_t button)
     bool raw_pressed = gpio_get_level(runtime->gpio) == 0;
     int64_t now = button_now_ms();
 
-    if (raw_pressed && !runtime->stable_pressed) {
-        runtime->stable_pressed = true;
-        runtime->pressed_at_ms = now;
-        runtime->long_reported = false;
+    if (raw_pressed != runtime->last_raw_pressed) {
         runtime->last_raw_pressed = raw_pressed;
+        runtime->raw_changed_at_ms = now;
         return BUTTON_EVENT_NONE;
+    }
+
+    if (raw_pressed != runtime->stable_pressed &&
+        now - runtime->raw_changed_at_ms >= BUTTON_DEBOUNCE_MS) {
+        runtime->stable_pressed = raw_pressed;
+        if (raw_pressed) {
+            runtime->pressed_at_ms = now;
+            runtime->long_reported = false;
+            return BUTTON_EVENT_NONE;
+        }
+
+        bool was_long = runtime->long_reported;
+        runtime->pressed_at_ms = 0;
+        runtime->long_reported = false;
+        return was_long ? BUTTON_EVENT_NONE : BUTTON_EVENT_SHORT_PRESS;
     }
 
     if (raw_pressed && runtime->stable_pressed && !runtime->long_reported &&
         now - runtime->pressed_at_ms >= BUTTON_LONG_PRESS_MS) {
         runtime->long_reported = true;
-        runtime->last_raw_pressed = raw_pressed;
         return BUTTON_EVENT_LONG_PRESS;
     }
-
-    if (!raw_pressed && runtime->stable_pressed) {
-        bool was_long = runtime->long_reported;
-        runtime->stable_pressed = false;
-        runtime->pressed_at_ms = 0;
-        runtime->long_reported = false;
-        runtime->last_raw_pressed = raw_pressed;
-        return was_long ? BUTTON_EVENT_NONE : BUTTON_EVENT_SHORT_PRESS;
-    }
-
-    runtime->last_raw_pressed = raw_pressed;
     return BUTTON_EVENT_NONE;
 }
 

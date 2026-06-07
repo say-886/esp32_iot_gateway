@@ -2,6 +2,8 @@
 
 项目采用 ESP-IDF component 方式拆分模块，`main` 只负责启动流程和任务创建，具体能力放到 `components` 中。
 
+系统学习路线见 [`learning_route.md`](learning_route.md)，建议先按函数阅读顺序掌握启动流程、FreeRTOS 任务、GPIO/I2C、网络通信、NVS/OTA，再根据其中的 7 天学习计划、简历写法和一周结束掌握标准提炼面试表达。
+
 可讲重点：
 
 - `board` 统一维护 GPIO，避免引脚散落在业务代码中。

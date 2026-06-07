@@ -14,4 +14,5 @@ idf_component_register(
         storage_nvs
         esp_http_server
         esp_system
+        json
 )

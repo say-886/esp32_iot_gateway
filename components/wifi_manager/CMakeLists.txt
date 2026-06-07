@@ -8,6 +8,7 @@ idf_component_register(
         esp_event
         esp_netif
         esp_wifi
+        esp_timer
         mqtt_service
         storage_nvs
 )

@@ -5,6 +5,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "device_status.h"
 #include "error_code.h"
@@ -14,7 +15,47 @@
 static const char *TAG = "wifi_manager";
 static bool s_wifi_connected;
 static bool s_wifi_initialized;
+static esp_timer_handle_t s_reconnect_timer;
+static uint32_t s_reconnect_attempt;
 
+#define WIFI_RECONNECT_BASE_MS 1000U
+#define WIFI_RECONNECT_MAX_MS 30000U
+#define WIFI_ERROR_THRESHOLD 5U
+
+static void wifi_reconnect_timer_callback(void *arg)
+{
+    (void)arg;
+    esp_err_t err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi reconnect request failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void wifi_schedule_reconnect(void)
+{
+    uint32_t shift = s_reconnect_attempt < 5U ? s_reconnect_attempt : 5U;
+    uint32_t delay_ms = WIFI_RECONNECT_BASE_MS << shift;
+    if (delay_ms > WIFI_RECONNECT_MAX_MS) {
+        delay_ms = WIFI_RECONNECT_MAX_MS;
+    }
+    s_reconnect_attempt++;
+    esp_timer_stop(s_reconnect_timer);
+    esp_err_t err = esp_timer_start_once(s_reconnect_timer, (uint64_t)delay_ms * 1000U);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "schedule reconnect failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGW(TAG, "wifi reconnect scheduled in %lu ms, attempt=%lu",
+                 (unsigned long)delay_ms, (unsigned long)s_reconnect_attempt);
+    }
+}
+
+/**
+ * @brief 检查 WiFi 配置是否为初始占位符。
+ * 
+ * @param config 指向待检查配置的指针。
+ * @return true 是占位符。
+ * @return false 已配置真实凭据。
+ */
 static bool wifi_config_is_placeholder(const app_config_t *config)
 {
     return config == NULL ||
@@ -39,21 +80,26 @@ static void wifi_event_handler(void *arg,
                                void *event_data)
 {
     (void)arg;
-    (void)event_data;
-
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         ESP_LOGI(TAG, "wifi station started");
         /* STA 启动仅表示开始联网流程，尚未真正连上网络。 */
         device_status_update_network(false, false);
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *disconnected =
+            (const wifi_event_sta_disconnected_t *)event_data;
         s_wifi_connected = false;
         ESP_ERROR_CHECK_WITHOUT_ABORT(mqtt_service_stop());
         device_status_update_network(false, false);
-        ESP_LOGW(TAG, "wifi disconnected, retrying");
-        esp_wifi_connect();
+        if (s_reconnect_attempt >= WIFI_ERROR_THRESHOLD) {
+            device_status_set_error(APP_ERR_WIFI_CONNECT_FAILED);
+        }
+        ESP_LOGW(TAG, "wifi disconnected, reason=%u", disconnected != NULL ? disconnected->reason : 0U);
+        wifi_schedule_reconnect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         s_wifi_connected = true;
+        s_reconnect_attempt = 0;
+        esp_timer_stop(s_reconnect_timer);
         device_status_update_network(true, false);
         ESP_LOGI(TAG, "wifi got ip");
         esp_err_t err = mqtt_service_start();
@@ -82,6 +128,15 @@ esp_err_t wifi_manager_init(void)
 
     wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_wifi_init(&init_config);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const esp_timer_create_args_t reconnect_timer_args = {
+        .callback = wifi_reconnect_timer_callback,
+        .name = "wifi_reconnect",
+    };
+    err = esp_timer_create(&reconnect_timer_args, &s_reconnect_timer);
     if (err != ESP_OK) {
         return err;
     }

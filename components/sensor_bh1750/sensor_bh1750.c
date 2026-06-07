@@ -15,6 +15,12 @@
 
 static uint8_t s_bh1750_addr = BH1750_ADDR_LOW;
 
+/**
+ * @brief 探测指定 I2C 地址是否存在 BH1750 传感器。
+ * 
+ * @param addr I2C 地址。
+ * @return esp_err_t ESP_OK 存在且响应。
+ */
 static esp_err_t bh1750_probe(uint8_t addr)
 {
     const uint8_t cmd = BH1750_CMD_CONT_H_RES;
@@ -22,6 +28,13 @@ static esp_err_t bh1750_probe(uint8_t addr)
                                       pdMS_TO_TICKS(BH1750_TIMEOUT_MS));
 }
 
+/**
+ * @brief 初始化 BH1750 传感器。
+ * 
+ * 自动探测 0x23 和 0x5C 两个可能的地址。
+ * 
+ * @return esp_err_t ESP_OK 成功。
+ */
 esp_err_t bh1750_init(void)
 {
     esp_err_t ret = bh1750_probe(BH1750_ADDR_LOW);
@@ -37,6 +50,12 @@ esp_err_t bh1750_init(void)
     return ret;
 }
 
+/**
+ * @brief 读取 BH1750 的光照强度数据。
+ * 
+ * @param light_lux 输出参数，存储光照强度值（Lux）。
+ * @return esp_err_t ESP_OK 成功。
+ */
 esp_err_t bh1750_read(float *light_lux)
 {
     if (light_lux == NULL) {

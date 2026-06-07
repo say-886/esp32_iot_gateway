@@ -2,9 +2,11 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "app_state.h"
+#include "cJSON.h"
 #include "device_status.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -16,6 +18,25 @@
 
 static const char *TAG = "web_server";
 static httpd_handle_t s_server;
+static volatile bool s_ota_running;
+
+typedef struct {
+    char url[192];
+} ota_task_context_t;
+
+static void ota_upgrade_task(void *arg)
+{
+    ota_task_context_t *context = (ota_task_context_t *)arg;
+    esp_err_t err = ota_service_start_http_upgrade(context->url);
+    free(context);
+    if (err != ESP_OK) {
+        device_status_set_error(APP_ERR_OTA_FAILED);
+    } else {
+        device_status_clear_error(APP_ERR_OTA_FAILED);
+    }
+    s_ota_running = false;
+    vTaskDelete(NULL);
+}
 
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[] asm("_binary_index_html_end");
@@ -24,6 +45,15 @@ extern const uint8_t style_css_end[] asm("_binary_style_css_end");
 extern const uint8_t app_js_start[] asm("_binary_app_js_start");
 extern const uint8_t app_js_end[] asm("_binary_app_js_end");
 
+/**
+ * @brief 发送嵌入到固件二进制中的静态文件（HTML/CSS/JS）。
+ * 
+ * @param req HTTP 请求句柄。
+ * @param content_type 文件的 MIME 类型。
+ * @param start 文件在内存中的起始地址。
+ * @param end 文件在内存中的结束地址。
+ * @return esp_err_t ESP_OK 成功。
+ */
 static esp_err_t send_embedded_file(httpd_req_t *req,
                                     const char *content_type,
                                     const uint8_t *start,
@@ -45,146 +75,111 @@ static esp_err_t send_embedded_file(httpd_req_t *req,
     return httpd_resp_send(req, (const char *)start, length);
 }
 
+/**
+ * @brief 首页 HTML 处理函数。
+ */
 static esp_err_t index_handler(httpd_req_t *req)
 {
     return send_embedded_file(req, "text/html; charset=utf-8", index_html_start, index_html_end);
 }
 
+/**
+ * @brief CSS 样式表处理函数。
+ */
 static esp_err_t style_handler(httpd_req_t *req)
 {
     return send_embedded_file(req, "text/css; charset=utf-8", style_css_start, style_css_end);
 }
 
+/**
+ * @brief JavaScript 脚本处理函数。
+ */
 static esp_err_t script_handler(httpd_req_t *req)
 {
     return send_embedded_file(req, "application/javascript; charset=utf-8", app_js_start, app_js_end);
 }
 
-static bool json_has_key(const char *body, const char *key)
+/**
+ * @brief 检查 JSON 请求体中是否包含指定的键。
+ */
+static esp_err_t receive_request_body(httpd_req_t *req, char *body, size_t body_size)
 {
-    return body != NULL && strstr(body, key) != NULL;
+    if (req->content_len <= 0 || req->content_len >= body_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    size_t received_total = 0;
+    while (received_total < req->content_len) {
+        int received = httpd_req_recv(req,
+                                      body + received_total,
+                                      req->content_len - received_total);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (received <= 0) {
+            return ESP_FAIL;
+        }
+        received_total += (size_t)received;
+    }
+    body[received_total] = '\0';
+    return ESP_OK;
 }
 
-static bool json_parse_bool_value(const char *body, const char *key, bool *out_value)
+static bool json_get_bool(const cJSON *root, const char *key, bool *present, bool *value)
 {
-    const char *pos = NULL;
-
-    if (body == NULL || out_value == NULL) {
-        return false;
-    }
-
-    pos = strstr(body, key);
-    if (pos == NULL) {
-        return false;
-    }
-
-    pos = strchr(pos, ':');
-    if (pos == NULL) {
-        return false;
-    }
-
-    pos++;
-    while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
-        pos++;
-    }
-
-    if (*pos == '1' || strncmp(pos, "true", 4) == 0) {
-        *out_value = true;
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    *present = item != NULL;
+    if (item == NULL) {
         return true;
     }
-    if (*pos == '0' || strncmp(pos, "false", 5) == 0) {
-        *out_value = false;
+    if (cJSON_IsBool(item)) {
+        *value = cJSON_IsTrue(item);
         return true;
     }
-
+    if (cJSON_IsNumber(item) && (item->valueint == 0 || item->valueint == 1)) {
+        *value = item->valueint == 1;
+        return true;
+    }
     return false;
 }
 
-static bool json_copy_string(const char *body, const char *key, char *out, size_t out_size)
+static bool json_copy_optional_string(const cJSON *root, const char *key, char *out, size_t out_size)
 {
-    const char *pos = NULL;
-    const char *start = NULL;
-    const char *end = NULL;
-    size_t len = 0;
-
-    if (body == NULL || out == NULL || out_size == 0) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (item == NULL) {
+        return true;
+    }
+    if (!cJSON_IsString(item) || item->valuestring == NULL ||
+        strlen(item->valuestring) >= out_size) {
         return false;
     }
-
-    pos = strstr(body, key);
-    if (pos == NULL) {
-        return false;
-    }
-
-    pos = strchr(pos, ':');
-    if (pos == NULL) {
-        return false;
-    }
-
-    start = strchr(pos, '"');
-    if (start == NULL) {
-        return false;
-    }
-    start++;
-
-    end = strchr(start, '"');
-    if (end == NULL || end <= start) {
-        return false;
-    }
-
-    len = (size_t)(end - start);
-    if (len >= out_size) {
-        len = out_size - 1;
-    }
-
-    memcpy(out, start, len);
-    out[len] = '\0';
+    strcpy(out, item->valuestring);
     return true;
 }
 
-static bool json_copy_u16(const char *body, const char *key, uint16_t *out)
+static bool json_copy_optional_u16(const cJSON *root, const char *key, uint16_t *out)
 {
-    const char *pos = NULL;
-    int value = 0;
-
-    if (body == NULL || out == NULL) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (item == NULL) {
+        return true;
+    }
+    if (!cJSON_IsNumber(item) || item->valuedouble < 1 || item->valuedouble > 65535) {
         return false;
     }
-
-    pos = strstr(body, key);
-    if (pos == NULL) {
-        return false;
-    }
-
-    pos = strchr(pos, ':');
-    if (pos == NULL || sscanf(pos + 1, "%d", &value) != 1 || value < 0 || value > 65535) {
-        return false;
-    }
-
-    *out = (uint16_t)value;
+    *out = (uint16_t)item->valueint;
     return true;
 }
 
-static bool json_copy_u32(const char *body, const char *key, uint32_t *out)
+static bool json_copy_optional_u32(const cJSON *root, const char *key, uint32_t *out)
 {
-    const char *pos = NULL;
-    unsigned long value = 0;
-
-    if (body == NULL || out == NULL) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (item == NULL) {
+        return true;
+    }
+    if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble > UINT32_MAX) {
         return false;
     }
-
-    pos = strstr(body, key);
-    if (pos == NULL) {
-        return false;
-    }
-
-    pos = strchr(pos, ':');
-    if (pos == NULL || sscanf(pos + 1, "%lu", &value) != 1) {
-        return false;
-    }
-
-    *out = (uint32_t)value;
+    *out = (uint32_t)item->valuedouble;
     return true;
 }
 
@@ -198,7 +193,7 @@ static esp_err_t status_handler(httpd_req_t *req)
                        "{\"temperature\":%.1f,\"humidity\":%.1f,\"light\":%.1f,"
                        "\"led\":%d,\"buzzer\":%d,\"relay\":%d,"
                        "\"wifi\":%d,\"mqtt\":%d,\"uptime\":%lu,"
-                       "\"error_code\":%lu,\"firmware\":\"%s\",\"state\":\"%s\"}",
+                       "\"error_code\":%lu,\"error_flags\":%lu,\"firmware\":\"%s\",\"state\":\"%s\"}",
                        status.temperature,
                        status.humidity,
                        status.light,
@@ -209,6 +204,7 @@ static esp_err_t status_handler(httpd_req_t *req)
                        status.mqtt_connected ? 1 : 0,
                        (unsigned long)status.uptime_sec,
                        (unsigned long)status.error_code,
+                       (unsigned long)status.error_flags,
                        status.firmware_version,
                        app_state_to_string(status.state));
     if (len < 0 || len >= (int)sizeof(response)) {
@@ -222,29 +218,19 @@ static esp_err_t status_handler(httpd_req_t *req)
 static esp_err_t control_handler(httpd_req_t *req)
 {
     char body[128] = {0};
-    int received = httpd_req_recv(req, body, sizeof(body) - 1);
-    bool parse_failed = false;
-    if (received <= 0) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+    if (receive_request_body(req, body, sizeof(body)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body size");
     }
-    body[received] = '\0';
 
-    device_cmd_t cmd = {
-        .led_set = json_has_key(body, "\"led\""),
-        .buzzer_set = json_has_key(body, "\"buzzer\""),
-        .relay_set = json_has_key(body, "\"relay\""),
-    };
-
-    if (cmd.led_set && !json_parse_bool_value(body, "\"led\"", &cmd.led_value)) {
-        parse_failed = true;
-    }
-    if (cmd.buzzer_set && !json_parse_bool_value(body, "\"buzzer\"", &cmd.buzzer_value)) {
-        parse_failed = true;
-    }
-    if (cmd.relay_set && !json_parse_bool_value(body, "\"relay\"", &cmd.relay_value)) {
-        parse_failed = true;
-    }
-    if (parse_failed) {
+    cJSON *root = cJSON_Parse(body);
+    device_cmd_t cmd = {0};
+    bool valid = root != NULL && cJSON_IsObject(root) &&
+                 json_get_bool(root, "led", &cmd.led_set, &cmd.led_value) &&
+                 json_get_bool(root, "buzzer", &cmd.buzzer_set, &cmd.buzzer_value) &&
+                 json_get_bool(root, "relay", &cmd.relay_set, &cmd.relay_value) &&
+                 (cmd.led_set || cmd.buzzer_set || cmd.relay_set);
+    if (!valid) {
+        cJSON_Delete(root);
         ESP_LOGW(TAG, "invalid control payload: %s", body);
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid control payload");
     }
@@ -259,6 +245,7 @@ static esp_err_t control_handler(httpd_req_t *req)
              cmd.relay_set ? 1 : 0,
              cmd.relay_value ? 1 : 0);
     device_status_update_control(&cmd);
+    cJSON_Delete(root);
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
@@ -293,11 +280,9 @@ static esp_err_t config_get_handler(httpd_req_t *req)
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
     char body[384] = {0};
-    int received = httpd_req_recv(req, body, sizeof(body) - 1);
-    if (received <= 0) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+    if (receive_request_body(req, body, sizeof(body)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body size");
     }
-    body[received] = '\0';
 
     app_config_t config;
     esp_err_t err = storage_load_config(&config);
@@ -305,12 +290,19 @@ static esp_err_t config_post_handler(httpd_req_t *req)
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load config failed");
     }
 
-    json_copy_string(body, "\"wifi_ssid\"", config.wifi_ssid, sizeof(config.wifi_ssid));
-    json_copy_string(body, "\"wifi_password\"", config.wifi_password, sizeof(config.wifi_password));
-    json_copy_string(body, "\"mqtt_host\"", config.mqtt_host, sizeof(config.mqtt_host));
-    json_copy_u16(body, "\"mqtt_port\"", &config.mqtt_port);
-    json_copy_string(body, "\"device_id\"", config.device_id, sizeof(config.device_id));
-    json_copy_u32(body, "\"sample_period_ms\"", &config.sample_period_ms);
+    cJSON *root = cJSON_Parse(body);
+    bool valid = root != NULL && cJSON_IsObject(root) &&
+                 json_copy_optional_string(root, "wifi_ssid", config.wifi_ssid, sizeof(config.wifi_ssid)) &&
+                 json_copy_optional_string(root, "wifi_password", config.wifi_password, sizeof(config.wifi_password)) &&
+                 json_copy_optional_string(root, "mqtt_host", config.mqtt_host, sizeof(config.mqtt_host)) &&
+                 json_copy_optional_u16(root, "mqtt_port", &config.mqtt_port) &&
+                 json_copy_optional_string(root, "device_id", config.device_id, sizeof(config.device_id)) &&
+                 json_copy_optional_u32(root, "sample_period_ms", &config.sample_period_ms) &&
+                 storage_validate_config(&config) == ESP_OK;
+    cJSON_Delete(root);
+    if (!valid) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid config payload");
+    }
 
     err = storage_save_config(&config);
     if (err != ESP_OK) {
@@ -334,25 +326,43 @@ static esp_err_t ota_handler(httpd_req_t *req)
 {
     char body[256] = {0};
     char url[192] = {0};
-    int received = httpd_req_recv(req, body, sizeof(body) - 1);
-    if (received <= 0) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+    if (receive_request_body(req, body, sizeof(body)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body size");
     }
-    body[received] = '\0';
 
-    if (!json_copy_string(body, "\"url\"", url, sizeof(url))) {
+    cJSON *root = cJSON_Parse(body);
+    const cJSON *url_item = root != NULL ? cJSON_GetObjectItemCaseSensitive(root, "url") : NULL;
+    bool valid = cJSON_IsString(url_item) && url_item->valuestring != NULL &&
+                 strlen(url_item->valuestring) < sizeof(url);
+    if (valid) {
+        strcpy(url, url_item->valuestring);
+    }
+    cJSON_Delete(root);
+    if (!valid) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing url");
+    }
+    if (strncmp(url, "https://", 8) != 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "https url required");
+    }
+    if (s_ota_running) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "ota already running");
+    }
+
+    ota_task_context_t *context = calloc(1, sizeof(*context));
+    if (context == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "ota allocation failed");
+    }
+    strcpy(context->url, url);
+    s_ota_running = true;
+    if (xTaskCreate(ota_upgrade_task, "ota_upgrade", 8192, context, 5, NULL) != pdPASS) {
+        s_ota_running = false;
+        free(context);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "ota task create failed");
     }
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"ok\":true,\"ota_started\":true}");
-    vTaskDelay(pdMS_TO_TICKS(200));
-
-    esp_err_t err = ota_service_start_http_upgrade(url);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA request failed: %s", esp_err_to_name(err));
-    }
-    return ESP_OK;
+    return httpd_resp_sendstr(req, "{\"ok\":true,\"ota_started\":true}");
 }
 
 esp_err_t web_server_start(void)
