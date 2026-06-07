@@ -19,15 +19,22 @@ static const char *TAG = "app_main";
 static device_status_t g_device_status;
 
 /**
- * @brief 启动网关应用并拉起所有核心服务。
+ * @brief 应用程序主入口。
  *
- * 该函数先初始化共享状态，再按依赖顺序初始化板级驱动、控制层、
- * 持久化配置、网络服务和看门狗，最后创建占位任务。
+ * 该函数在系统启动时被调用。它负责按照依赖顺序初始化所有硬件组件和软件服务：
+ * 1. 初始化共享设备状态内存。
+ * 2. 初始化板级硬件（I2C、GPIO等）。
+ * 3. 初始化执行器控制层和按键输入层。
+ * 4. 初始化外设（OLED、AHT20、BH1750）。
+ * 5. 初始化 NVS 存储。
+ * 6. 启动网络服务（WiFi、Web Server）。
+ * 7. 启动系统监视服务（看门狗）。
+ * 8. 创建 FreeRTOS 业务任务。
  */
 void app_main(void)
 {
     /* 在其他服务使用状态前，先准备内存中的状态快照。 */
-    app_status_init(&g_device_status);
+    app_status_init(&g_device_status);      /* 初始化应用状态 */
     device_status_store_init();
 
     ESP_LOGI(TAG, "Project: %s", APP_PROJECT_NAME);
@@ -55,19 +62,19 @@ void app_main(void)
     return;
 #endif
 
-    ESP_ERROR_CHECK(board_init());
-    ESP_ERROR_CHECK(device_control_init());
-    ESP_ERROR_CHECK(button_init());
+    ESP_ERROR_CHECK(board_init());  // 初始化板级硬件（I2C、按键GPIO）
+    ESP_ERROR_CHECK(device_control_init()); // 初始化执行器控制层（LED、蜂鸣器、继电器）
+    ESP_ERROR_CHECK(button_init()); // 初始化按键输入层（4个按键）
 
-    esp_err_t oled_ret = oled_init();
-    if (oled_ret != ESP_OK) {
+    esp_err_t oled_ret = oled_init();       // 初始化 OLED 显示（准备显示温湿度看板）
+       if (oled_ret != ESP_OK) {
         ESP_LOGW(TAG, "OLED init skipped: %s. Check SSD1306 wiring/address.",
                  esp_err_to_name(oled_ret));
     } else {
         ESP_LOGI(TAG, "OLED init OK");
     }
 
-    esp_err_t sensor_ret = aht20_init();
+    esp_err_t sensor_ret = aht20_init();     // 初始化 AHT20 温湿度传感器
     if (sensor_ret != ESP_OK) {
         ESP_LOGE(TAG, "AHT20 init failed: %s. Check VCC/GND/SDA/SCL wiring.",
                  esp_err_to_name(sensor_ret));
@@ -76,7 +83,7 @@ void app_main(void)
         ESP_LOGI(TAG, "AHT20 init OK");
     }
 
-    sensor_ret = bh1750_init();
+    sensor_ret = bh1750_init();     // 初始化 BH1750 光敏传感器
     if (sensor_ret != ESP_OK) {
         ESP_LOGE(TAG, "BH1750 init failed: %s. Check VCC/GND/SDA/SCL wiring.",
                  esp_err_to_name(sensor_ret));
@@ -85,7 +92,7 @@ void app_main(void)
         ESP_LOGI(TAG, "BH1750 init OK");
     }
 
-    ESP_ERROR_CHECK(storage_nvs_init());
+    ESP_ERROR_CHECK(storage_nvs_init()); // 初始化 NVS 存储（用于存储应用配置和状态快照，如 WiFi 配置、MQTT 主题等）
 
 #if APP_ENABLE_NETWORK_SERVICES
     ESP_ERROR_CHECK(wifi_manager_init());
@@ -98,5 +105,5 @@ void app_main(void)
     ESP_ERROR_CHECK(watchdog_service_init());
 
     /* 平台服务准备完成后，再启动演示任务。 */
-    app_create_placeholder_tasks();
+    ESP_ERROR_CHECK(app_create_placeholder_tasks());
 }

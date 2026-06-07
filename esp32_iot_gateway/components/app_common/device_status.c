@@ -1,14 +1,74 @@
 #include "device_status.h"
 
+#include <stddef.h>
 #include <string.h>
 
 #include "error_code.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #define DEVICE_STATUS_DEFAULT_FIRMWARE "v0.1.0-prep"
 
 static device_status_t s_status;
+static SemaphoreHandle_t s_status_mutex;
 
-static void device_status_restore_state_from_network(void)
+static void status_lock(void)
+{
+    if (s_status_mutex != NULL) {
+        xSemaphoreTake(s_status_mutex, portMAX_DELAY);
+    }
+}
+
+static void status_unlock(void)
+{
+    if (s_status_mutex != NULL) {
+        xSemaphoreGive(s_status_mutex);
+    }
+}
+
+static bool is_sensor_error(uint32_t error_code)
+{
+    return error_code == APP_ERR_AHT20_READ_FAILED ||
+           error_code == APP_ERR_BH1750_READ_FAILED;
+}
+
+static uint32_t error_flag(uint32_t error_code)
+{
+    switch (error_code) {
+    case APP_ERR_WIFI_CONNECT_FAILED: return 1U << 0;
+    case APP_ERR_MQTT_CONNECT_FAILED: return 1U << 1;
+    case APP_ERR_AHT20_READ_FAILED: return 1U << 2;
+    case APP_ERR_BH1750_READ_FAILED: return 1U << 3;
+    case APP_ERR_NVS_READ_FAILED: return 1U << 4;
+    case APP_ERR_NVS_WRITE_FAILED: return 1U << 5;
+    case APP_ERR_OTA_FAILED: return 1U << 6;
+    case APP_ERR_WATCHDOG: return 1U << 7;
+    default: return 0;
+    }
+}
+
+static uint32_t primary_error(void)
+{
+    static const uint32_t priority[] = {
+        APP_ERR_WATCHDOG,
+        APP_ERR_OTA_FAILED,
+        APP_ERR_NVS_WRITE_FAILED,
+        APP_ERR_NVS_READ_FAILED,
+        APP_ERR_WIFI_CONNECT_FAILED,
+        APP_ERR_MQTT_CONNECT_FAILED,
+        APP_ERR_AHT20_READ_FAILED,
+        APP_ERR_BH1750_READ_FAILED,
+    };
+
+    for (size_t i = 0; i < sizeof(priority) / sizeof(priority[0]); i++) {
+        if ((s_status.error_flags & error_flag(priority[i])) != 0U) {
+            return priority[i];
+        }
+    }
+    return APP_ERR_NONE;
+}
+
+static void restore_state_from_network(void)
 {
     if (s_status.mqtt_connected) {
         s_status.state = DEVICE_STATE_ONLINE;
@@ -19,17 +79,18 @@ static void device_status_restore_state_from_network(void)
     }
 }
 
-static bool device_status_is_sensor_error(uint32_t error_code)
+static void refresh_state(void)
 {
-    return error_code == APP_ERR_AHT20_READ_FAILED ||
-           error_code == APP_ERR_BH1750_READ_FAILED;
+    s_status.error_code = primary_error();
+    if (s_status.error_code == APP_ERR_NONE) {
+        restore_state_from_network();
+    } else if (is_sensor_error(s_status.error_code)) {
+        s_status.state = DEVICE_STATE_RECOVERY;
+    } else {
+        s_status.state = DEVICE_STATE_ERROR;
+    }
 }
 
-/**
- * @brief 使用适合演示网关的默认值初始化状态结构体。
- *
- * @param status 输出参数，接收初始化后的状态结构体。
- */
 void device_status_init_default(device_status_t *status)
 {
     if (status == NULL) {
@@ -40,60 +101,50 @@ void device_status_init_default(device_status_t *status)
     status->temperature = 26.5f;
     status->humidity = 60.2f;
     status->light = 380.0f;
-    status->error_code = APP_ERR_NONE;
     status->state = DEVICE_STATE_INIT;
     strncpy(status->firmware_version,
             DEVICE_STATUS_DEFAULT_FIRMWARE,
             sizeof(status->firmware_version) - 1);
 }
 
-/**
- * @brief 初始化模块内部维护的全局状态快照。
- */
 void device_status_store_init(void)
 {
+    if (s_status_mutex == NULL) {
+        s_status_mutex = xSemaphoreCreateMutex();
+        configASSERT(s_status_mutex != NULL);
+    }
+    status_lock();
     device_status_init_default(&s_status);
+    status_unlock();
 }
 
-/**
- * @brief 将最新全局状态复制给调用方。
- *
- * @param status 输出参数，接收当前状态快照。
- */
 void device_status_get(device_status_t *status)
 {
     if (status == NULL) {
         return;
     }
 
+    status_lock();
     *status = s_status;
+    status_unlock();
 }
 
-/**
- * @brief 更新共享设备状态中的传感器字段。
- *
- * @param temperature 最新温度值。
- * @param humidity 最新湿度值。
- * @param light 最新光照值。
- */
 void device_status_update_sensor(float temperature, float humidity, float light)
 {
+    status_lock();
     s_status.temperature = temperature;
     s_status.humidity = humidity;
     s_status.light = light;
+    status_unlock();
 }
 
-/**
- * @brief 将请求的执行器状态写入共享设备状态。
- *
- * @param cmd 输入参数，描述需要更新的执行器目标状态。
- */
 void device_status_update_control(const device_cmd_t *cmd)
 {
     if (cmd == NULL) {
         return;
     }
 
+    status_lock();
     if (cmd->led_set) {
         s_status.led_on = cmd->led_value;
     }
@@ -103,51 +154,52 @@ void device_status_update_control(const device_cmd_t *cmd)
     if (cmd->relay_set) {
         s_status.relay_on = cmd->relay_value;
     }
+    status_unlock();
 }
 
-/**
- * @brief 刷新网络连接标志，并推导设备的粗粒度运行状态。
- *
- * @param wifi_connected Wi-Fi 是否已连接。
- * @param mqtt_connected MQTT 是否已连接。
- */
 void device_status_update_network(bool wifi_connected, bool mqtt_connected)
 {
+    status_lock();
     s_status.wifi_connected = wifi_connected;
     s_status.mqtt_connected = mqtt_connected;
-
-    if (s_status.error_code == APP_ERR_NONE) {
-        /* 无错误时直接映射网络连接进度。 */
-        device_status_restore_state_from_network();
-    } else if (device_status_is_sensor_error(s_status.error_code)) {
-        /* 传感器错误视为可降级运行，保留网络状态并标识为恢复中。 */
-        s_status.state = DEVICE_STATE_RECOVERY;
+    if (wifi_connected) {
+        s_status.error_flags &= ~error_flag(APP_ERR_WIFI_CONNECT_FAILED);
     }
+    if (mqtt_connected) {
+        s_status.error_flags &= ~error_flag(APP_ERR_MQTT_CONNECT_FAILED);
+    }
+    refresh_state();
+    status_unlock();
 }
 
 void device_status_set_state(device_state_t state)
 {
+    status_lock();
     s_status.state = state;
+    status_unlock();
 }
 
 void device_status_set_error(uint32_t error_code)
 {
-    s_status.error_code = error_code;
-    if (error_code == APP_ERR_NONE) {
-        device_status_restore_state_from_network();
-    } else if (device_status_is_sensor_error(error_code)) {
-        s_status.state = DEVICE_STATE_RECOVERY;
-    } else {
-        s_status.state = DEVICE_STATE_ERROR;
+    status_lock();
+    if (error_code != APP_ERR_NONE) {
+        s_status.error_flags |= error_flag(error_code);
     }
+    refresh_state();
+    status_unlock();
 }
 
-/**
- * @brief 增加系统累计运行时间计数。
- *
- * @param seconds 需要累加的秒数。
- */
+void device_status_clear_error(uint32_t error_code)
+{
+    status_lock();
+    s_status.error_flags &= ~error_flag(error_code);
+    refresh_state();
+    status_unlock();
+}
+
 void device_status_tick(uint32_t seconds)
 {
+    status_lock();
     s_status.uptime_sec += seconds;
+    status_unlock();
 }

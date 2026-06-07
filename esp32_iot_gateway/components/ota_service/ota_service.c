@@ -3,6 +3,7 @@
 #include "esp_err.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
+#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -20,6 +21,7 @@ esp_err_t ota_service_start_http_upgrade(const char *url)
         .url = url,
         .timeout_ms = 10000,
         .keep_alive_enable = true,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_https_ota_config_t ota_config = {

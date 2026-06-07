@@ -26,6 +26,8 @@ esp_err_t storage_nvs_init(void);
  */
 esp_err_t storage_load_config(app_config_t *config);
 
+esp_err_t storage_validate_config(const app_config_t *config);
+
 /**
  * @brief 将应用配置写入 NVS。
  *

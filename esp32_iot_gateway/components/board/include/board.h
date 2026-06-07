@@ -27,13 +27,15 @@
 
 #define BOARD_OUTPUT_GPIO_MASK ((1ULL << BOARD_LED_GPIO) | \
                                 (1ULL << BOARD_BUZZER_GPIO) | \
-                                (1ULL << BOARD_RELAY_GPIO))
+                                (1ULL << BOARD_RELAY_GPIO))      // 输出 GPIO 掩码
 
 #define BOARD_BUTTON_GPIO_MASK ((1ULL << BOARD_BUTTON_1_GPIO) | \
                                 (1ULL << BOARD_BUTTON_2_GPIO) | \
                                 (1ULL << BOARD_BUTTON_3_GPIO) | \
-                                (1ULL << BOARD_BUTTON_4_GPIO))
+                                (1ULL << BOARD_BUTTON_4_GPIO))      // 按钮 GPIO 掩码
 
 esp_err_t board_init(void);
+esp_err_t board_i2c_lock(void);
+void board_i2c_unlock(void);
 
 #endif
