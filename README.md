@@ -19,9 +19,6 @@
 | OLED | 已接入 SSD1306 驱动 | 启动时自动探测 `0x3C/0x3D`，在显示任务中刷新状态 |
 | 降级运行 | 已支持 | AHT20 异常时仍可继续验证 WiFi、Web API、MQTT 与 GPIO 控制 |
 
-## 学习路线
-
-如果只具备 STM32 与 FreeRTOS 基础，建议先阅读 `docs/learning_route.md`。该文档按当前代码实际入口整理了学习顺序，包括 `app_main()`、FreeRTOS 任务、GPIO/I2C、WiFi/Web API/MQTT、NVS、看门狗和 OTA，并附带 7 天学习计划、每日问题汇总模板、简历写法与面试问题清单。
 
 ## 硬件清单
 
@@ -228,86 +225,3 @@ component_name/
 
 当前固件大小约 1.0MB，仍可放入 1.5MB OTA 分区。
 
-## 本地私有配置
-
-- 真实 `WiFi SSID/密码` 不建议直接写进仓库源码。
-- 工程现已支持本地私有配置文件：
-  `components/storage_nvs/include/storage_nvs_local.h`
-- 该文件已加入 `.gitignore`，不会被 Git 提交。
-- 示例模板见：
-  `components/storage_nvs/include/storage_nvs_local.example.h`
-
-## D0-D3 完成情况
-
-| 天数 | 目标 | 当前结果 |
-| --- | --- | --- |
-| D0 | 创建仓库、README 初稿、硬件清单、接线表模板、项目名称和模块划分 | 已完成 |
-| D1 | 安装工具链、设置目标芯片、编译工程 | ESP-IDF v5.3.2 已安装到 `E:\ESP`，`idf.py set-target esp32` 和 `idf.py build` 已通过 |
-| D2 | 新建工程结构，建立 `main/`、`components/`、`web/`，添加配置和入口文件 | 已完成骨架 |
-| D3 | 设计状态结构、命令结构、错误码、MQTT Topic、HTTP API，写 Web 假数据页面 | 已完成 |
-
-## ESP-IDF 环境步骤
-
-ESP-IDF 已安装到 `E:\ESP\frameworks\esp-idf-v5.3.2`，工具链和 Python 环境位于 `E:\ESP\tools`。已配置用户级环境变量：
-
-| 变量 | 值 |
-| --- | --- |
-| `IDF_PATH` | `E:\ESP\frameworks\esp-idf-v5.3.2` |
-| `IDF_TOOLS_PATH` | `E:\ESP\tools` |
-| `IDF_PYTHON_ENV_PATH` | `E:\ESP\tools\python_env\idf5.3_py3.12_env` |
-
-用户级 `PATH` 已加入 ESP-IDF 工具链目录。重新打开 PowerShell 或 cmd 后，通常可以直接运行：
-
-```powershell
-idf.py --version
-idf.py build
-```
-
-如果当前终端还没刷新环境变量，可以临时运行：
-
-```powershell
-$env:IDF_TOOLS_PATH = "E:\ESP\tools"
-& "E:\ESP\frameworks\esp-idf-v5.3.2\export.ps1"
-```
-
-也可以运行已准备好的备用脚本：
-
-```powershell
-& "E:\ESP\activate_esp_idf.ps1"
-```
-
-cmd 终端可运行：
-
-```bat
-E:\ESP\activate_esp_idf.bat
-```
-
-然后在工程目录执行：
-
-```powershell
-cd "C:\desktop\ESP32 Project\esp32_iot_gateway"
-idf.py set-target esp32
-idf.py build
-```
-
-当前已验证通过的版本：
-
-```text
-ESP-IDF v5.3.2
-target: esp32
-build: passed
-```
-
-## 后续每日任务入口
-
-建议按以下顺序继续推进：
-
-1. 切回完整工程模式后，逐个验证 `LED`、蜂鸣器、继电器、按键。
-2. 写入真实 `WiFi` 配置，联调 `Web API`。
-3. 验证 `MQTT` 五个主题的真实收发。
-4. 等新 `OLED` 到货后，再做地址扫描、初始化与显示联调。
-5. 最后做 `OTA`、`NVS`、看门狗和异常恢复场景验证。
-
-## 不夸大声明
-
-当前版本已经完成环境搭建、工程构建烧写监视验证，以及 `AHT20/BH1750/I2C` 基础联调；但 `WiFi`、`Web API`、`MQTT`、全部 GPIO、`OLED`、`OTA`、`NVS` 异常恢复、看门狗场景等仍需要继续实机验证后，才能写入简历或项目成果。
