@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "i2c_test.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        board
+        driver
+)

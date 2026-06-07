@@ -1,0 +1,9 @@
+build/
+sdkconfig
+managed_components/*
+!managed_components/.gitkeep
+*.log
+*.tmp
+datasheets/
+*.pdf
+components/storage_nvs/include/storage_nvs_local.h

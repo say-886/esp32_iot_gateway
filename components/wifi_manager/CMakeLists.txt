@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "wifi_manager.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        app_common
+        esp_event
+        esp_netif
+        esp_wifi
+        esp_timer
+        mqtt_service
+        storage_nvs
+)
