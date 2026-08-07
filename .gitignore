@@ -1,5 +1,6 @@
 build/
 sdkconfig
+sdkconfig.old
 managed_components/*
 !managed_components/.gitkeep
 *.log
@@ -7,3 +8,16 @@ managed_components/*
 datasheets/
 *.pdf
 components/storage_nvs/include/storage_nvs_local.h
+
+# 云端服务本地配置与运行数据
+cloud_backend/config.local.json
+cloud_backend/data/
+cloud_backend/node_modules/
+
+# Qt 客户端本地构建产物
+qt_linux_client/build*/
+qt_linux_client/third_party/
+
+# 通用临时输出
+output/
+tmp/

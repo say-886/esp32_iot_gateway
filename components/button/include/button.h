@@ -6,9 +6,9 @@
 #include "esp_err.h"
 
 typedef enum {
-    BUTTON_EVENT_NONE = 0,
-    BUTTON_EVENT_SHORT_PRESS,
-    BUTTON_EVENT_LONG_PRESS
+    BUTTON_EVENT_NONE = 0,  // 无按键事件
+    BUTTON_EVENT_SHORT_PRESS,   // 短按事件
+    BUTTON_EVENT_LONG_PRESS     // 长按事件
 } button_event_t;
 
 typedef enum {

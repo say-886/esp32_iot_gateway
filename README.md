@@ -2,6 +2,8 @@
 
 基于 ESP32 + ESP-IDF + FreeRTOS + Mongoose 的环境监测与远程控制网关。
 
+当前版本已从基础 MQTT 上传扩展为端边云可靠链路：设备端具备指数退避重连、QoS 1、LWT、流量控制、Flash 离线队列、PUBACK 后出队和本地边缘计算；云端具备多设备登记、遥测幂等和命令状态机；Qt 客户端支持新协议、命令 ACK 和数据库迁移。完整需求、实现方案和验收边界见 [`docs/reliability_design.md`](docs/reliability_design.md)。
+
 
 
 
@@ -34,6 +36,8 @@ esp32_iot_gateway/
 │   ├── wifi_manager/     # WiFi 管理组件
 │   ├── web_server/      # Web 服务器组件
 │   ├── mqtt_service/    # MQTT 服务组件
+│   ├── offline_store/   # Flash 离线遥测队列
+│   ├── edge_compute/    # 本地平滑与异常检测
 │   ├── storage_nvs/      # NVS 存储组件
 │   ├── watchdog_service/ # 看门狗服务组件
 │   ├── ota_service/     # OTA 服务组件
@@ -49,11 +53,12 @@ esp32_iot_gateway/
 │   ├── api_design.md
 │   ├── task_design.md
 │   ├── debug_notes.md
-│   ├── project_roadmap.md
-│   └── interview_notes.md
-└── tools/
-    ├── mqtt_test_payload.json
-    └── api_test.md
+│   └── project_roadmap.md
+├── tools/
+│   ├── mqtt_test_payload.json
+│   └── api_test.md
+├── cloud_backend/       # 多设备管理与遥测服务
+└── qt_linux_client/     # Qt/QML 桌面客户端
 ```
 
 普通组件目录采用以下结构：
@@ -71,11 +76,12 @@ component_name/
 
 | Topic | 方向 | 说明 |
 | --- | --- | --- |
-| `esp32/gateway/status` | 上行 | 上报设备整体状态 |
-| `esp32/gateway/sensor` | 上行 | 上报传感器数据 |
-| `esp32/gateway/heartbeat` | 上行 | 上报心跳 |
-| `esp32/gateway/cmd` | 下行 | 接收控制命令 |
-| `esp32/gateway/error` | 上行 | 上报错误信息 |
+| `esp32/gateway/<device_id>/status` | 上行 | 上报设备整体状态与 LWT |
+| `esp32/gateway/<device_id>/sensor` | 上行 | 上报原始、边缘和补传遥测 |
+| `esp32/gateway/<device_id>/heartbeat` | 上行 | 上报心跳和流量指标 |
+| `esp32/gateway/<device_id>/cmd` | 下行 | 接收带 ID 和有效期的控制命令 |
+| `esp32/gateway/<device_id>/cmd_ack` | 上行 | 上报命令执行结果 |
+| `esp32/gateway/<device_id>/error` | 上行 | 上报错误信息 |
 
 ## 状态与错误码
 
@@ -117,6 +123,16 @@ component_name/
 | `phy_init` | RF 参数 | 4K |
 | `ota_0` | 应用分区 A | 1536K |
 | `ota_1` | 应用分区 B | 1536K |
+| `telemetry` | 离线遥测队列 | 896K |
+| `coredump` | 崩溃转储 | 64K |
 
 当前固件大小约 1.0MB，仍可放入 1.5MB OTA 分区。
+
+新增 `telemetry` 分区后，旧设备首次部署必须完整烧录分区表；普通 OTA 只更新应用分区，不会创建新的数据分区。
+
+## 端边云可靠能力
+
+- 设备端：持久会话、LWT、QoS 1、指数退避、发送速率限制、Flash 离线队列和边缘异常检测。
+- 云端：SQLite 多设备登记、遥测去重、命令下发与 ACK 状态跟踪，使用说明见 [`cloud_backend/README.md`](cloud_backend/README.md)。
+- Qt 客户端：实时监控、设备控制、配置、OTA、Modbus、历史曲线和 MQTT 增强，使用说明见 [`qt_linux_client/README.md`](qt_linux_client/README.md)。
 

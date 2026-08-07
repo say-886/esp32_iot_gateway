@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32 云端看板</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">EMQX Cloud / ESP32</p>
+        <h1>环境数据与远程控制</h1>
+      </div>
+      <div class="status-pill" id="connection-state">等待数据</div>
+    </header>
+
+    <section class="metrics">
+      <article>
+        <span>温度</span>
+        <strong><span id="temperature">--</span><small> °C</small></strong>
+      </article>
+      <article>
+        <span>湿度</span>
+        <strong><span id="humidity">--</span><small> %</small></strong>
+      </article>
+      <article>
+        <span>光照</span>
+        <strong><span id="light">--</span><small> lx</small></strong>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <div class="panel-title">
+          <h2>传感器趋势</h2>
+          <span id="last-update">--</span>
+        </div>
+        <canvas id="chart" width="900" height="320"></canvas>
+      </article>
+
+      <aside class="panel controls">
+        <h2>远程控制</h2>
+        <button data-target="led">切换 LED</button>
+        <button data-target="buzzer">切换蜂鸣器</button>
+        <button data-target="relay">切换继电器</button>
+        <pre id="command-log">{}</pre>
+      </aside>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">
+        <h2>最新数据</h2>
+        <span>SQLite 幂等遥测 / 命令 ACK 状态机</span>
+      </div>
+      <pre id="payload">{}</pre>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -18,19 +18,32 @@ static bool s_wifi_initialized;
 static esp_timer_handle_t s_reconnect_timer;
 static uint32_t s_reconnect_attempt;
 
-#define WIFI_RECONNECT_BASE_MS 1000U
-#define WIFI_RECONNECT_MAX_MS 30000U
-#define WIFI_ERROR_THRESHOLD 5U
+#define WIFI_RECONNECT_BASE_MS 1000U        // 基础重连时间，1秒
+#define WIFI_RECONNECT_MAX_MS 30000U        // 最大重连时间，30秒
+#define WIFI_ERROR_THRESHOLD 5U           // 错误阈值，5次重连失败后，重连时间翻倍
 
+/**
+ * @brief 重连定时器回调函数。
+ *
+ * 该函数会在重连定时器到期时被调用，尝试重新连接 WiFi。
+ * 如果重连失败，会根据当前重连尝试次数，计算出下一个重连时间。
+ * 如果重连时间超过最大重连时间，会设置为最大重连时间。
+ */
 static void wifi_reconnect_timer_callback(void *arg)
 {
     (void)arg;
-    esp_err_t err = esp_wifi_connect();
+    esp_err_t err = esp_wifi_connect();     // 尝试重新连接 WiFi
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi reconnect request failed: %s", esp_err_to_name(err));
     }
 }
 
+/**
+ * @brief 计划一次重连尝试。
+ *
+ * 该函数会根据当前重连尝试次数，计算出下一个重连时间。
+ * 如果重连时间超过最大重连时间，会设置为最大重连时间。
+ */
 static void wifi_schedule_reconnect(void)
 {
     uint32_t shift = s_reconnect_attempt < 5U ? s_reconnect_attempt : 5U;
@@ -51,7 +64,7 @@ static void wifi_schedule_reconnect(void)
 
 /**
  * @brief 检查 WiFi 配置是否为初始占位符。
- * 
+ *
  * @param config 指向待检查配置的指针。
  * @return true 是占位符。
  * @return false 已配置真实凭据。

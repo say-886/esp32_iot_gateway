@@ -11,6 +11,7 @@ idf_component_register(
         app_common
         app_state
         modbus_service
+        mqtt_service
         ota_service
         storage_nvs
         esp_http_server

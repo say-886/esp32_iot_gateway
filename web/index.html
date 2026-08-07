@@ -11,96 +11,96 @@
     <header class="topbar panel hero-panel">
       <div class="hero-copy">
         <p class="eyebrow">ESP32 IoT Gateway</p>
-        <h1>环境监测与远程控制台</h1>
-        <p class="hero-text">面向嵌入式网关演示的实时监控界面，集中展示环境数据、连接状态与远程执行器控制。</p>
-        <div class="hero-tags" aria-label="控制台特性">
-          <span>实时采样</span>
-          <span>本地演示数据</span>
-          <span>REST + MQTT</span>
+        <h1>Environment Monitor and Remote Control</h1>
+        <p class="hero-text">Local dashboard for real-time telemetry, network state, and actuator control. HTTP remains available for device-side control, while EMQX Serverless WSS can mirror telemetry for remote viewers.</p>
+        <div class="hero-tags" aria-label="Platform features">
+          <span>Live Sampling</span>
+          <span>Local HTTP Control</span>
+          <span>REST + MQTT + WSS</span>
         </div>
-        <div class="hero-highlights" aria-label="运行摘要">
+        <div class="hero-highlights" aria-label="Runtime summary">
           <article class="hero-highlight">
-            <span>执行器在线</span>
+            <span>Actuators Online</span>
             <strong id="active-controls">0 / 3</strong>
           </article>
           <article class="hero-highlight">
-            <span>舒适指数</span>
-            <strong id="comfort-score">良好</strong>
+            <span>Comfort Score</span>
+            <strong id="comfort-score">Good</strong>
           </article>
           <article class="hero-highlight">
-            <span>网络质量</span>
-            <strong id="network-quality">初始化</strong>
+            <span>Network Quality</span>
+            <strong id="network-quality">Booting</strong>
           </article>
         </div>
       </div>
-      <div class="top-actions" aria-label="设备状态">
+      <div class="top-actions" aria-label="Device summary">
         <div class="status-card">
-          <span class="status-caption">设备状态</span>
+          <span class="status-caption">Device State</span>
           <span id="device-state" class="state-pill">INIT</span>
         </div>
         <div class="status-card">
-          <span class="status-caption">最近同步</span>
+          <span class="status-caption">Last Sync</span>
           <span id="last-sync" class="sync-time">--:--:--</span>
         </div>
       </div>
     </header>
 
-    <section class="status-strip" aria-label="连接状态">
+    <section class="status-strip" aria-label="Network status">
       <article class="status-item">
         <span>Wi-Fi</span>
-        <strong id="wifi">未连接</strong>
-        <small id="wifi-detail" class="status-detail">等待接入</small>
+        <strong id="wifi">Offline</strong>
+        <small id="wifi-detail" class="status-detail">Waiting for service</small>
       </article>
       <article class="status-item">
         <span>MQTT</span>
-        <strong id="mqtt">未连接</strong>
-        <small id="mqtt-detail" class="status-detail">等待服务端</small>
+        <strong id="mqtt">Offline</strong>
+        <small id="mqtt-detail" class="status-detail">Waiting for broker</small>
       </article>
       <article class="status-item">
-        <span>运行时间</span>
+        <span>Uptime</span>
         <strong id="uptime">0 s</strong>
-        <small id="uptime-detail" class="status-detail">系统刚启动</small>
+        <small id="uptime-detail" class="status-detail">System cold start</small>
       </article>
       <article class="status-item">
-        <span>固件版本</span>
+        <span>Firmware</span>
         <strong id="firmware">v0.1.0-prep</strong>
-        <small class="status-detail">演示构建通道</small>
+        <small class="status-detail">Local dashboard build</small>
       </article>
     </section>
 
     <section class="content-grid">
       <div class="main-column">
-        <section class="metric-grid" aria-label="传感器数据">
+        <section class="metric-grid" aria-label="Sensor metrics">
           <article class="panel metric-card temperature">
             <div class="metric-head">
-              <span class="label">温度</span>
+              <span class="label">Temperature</span>
               <span class="metric-badge">TMP</span>
             </div>
-            <strong><span id="temperature">26.5</span><small> °C</small></strong>
+            <strong><span id="temperature">26.5</span><small> C</small></strong>
             <div class="range">
-              <span>舒适</span>
+              <span>Comfort range</span>
               <meter id="temperature-meter" min="0" max="50" value="26.5"></meter>
             </div>
           </article>
           <article class="panel metric-card humidity">
             <div class="metric-head">
-              <span class="label">湿度</span>
+              <span class="label">Humidity</span>
               <span class="metric-badge">HUM</span>
             </div>
             <strong><span id="humidity">60.2</span><small> %</small></strong>
             <div class="range">
-              <span>正常</span>
+              <span>Nominal range</span>
               <meter id="humidity-meter" min="0" max="100" value="60.2"></meter>
             </div>
           </article>
           <article class="panel metric-card light">
             <div class="metric-head">
-              <span class="label">光照</span>
+              <span class="label">Light</span>
               <span class="metric-badge">LUX</span>
             </div>
             <strong><span id="light">380</span><small> lx</small></strong>
             <div class="range">
-              <span>室内</span>
+              <span>Indoor level</span>
               <meter id="light-meter" min="0" max="1000" value="380"></meter>
             </div>
           </article>
@@ -109,28 +109,28 @@
         <section class="panel chart-panel">
           <div class="panel-title">
             <div>
-              <h2>传感器趋势</h2>
-              <p>最近 12 次采样</p>
+              <h2>Telemetry Trend</h2>
+              <p>Latest 12 samples</p>
             </div>
             <div class="chart-meta">
-              <span class="legend-chip legend-temperature">温度</span>
-              <span class="legend-chip legend-humidity">湿度</span>
-              <span class="legend-chip legend-light">光照</span>
+              <span class="legend-chip legend-temperature">Temperature</span>
+              <span class="legend-chip legend-humidity">Humidity</span>
+              <span class="legend-chip legend-light">Light</span>
               <span class="sample-rate">2s</span>
             </div>
           </div>
-          <canvas id="trend-chart" width="900" height="260" aria-label="传感器趋势图"></canvas>
-          <div class="chart-insights" aria-label="趋势摘要">
+          <canvas id="trend-chart" width="900" height="260" aria-label="Telemetry trend chart"></canvas>
+          <div class="chart-insights" aria-label="Trend summary">
             <article>
-              <span>温度均值</span>
-              <strong id="temperature-avg">-- °C</strong>
+              <span>Average Temperature</span>
+              <strong id="temperature-avg">-- C</strong>
             </article>
             <article>
-              <span>湿度均值</span>
+              <span>Average Humidity</span>
               <strong id="humidity-avg">-- %</strong>
             </article>
             <article>
-              <span>光照均值</span>
+              <span>Average Light</span>
               <strong id="light-avg">-- lx</strong>
             </article>
           </div>
@@ -139,10 +139,10 @@
         <section class="panel api-panel">
           <div class="panel-title">
             <div>
-              <h2>接口预览</h2>
-              <p>当前状态 JSON 快照</p>
+              <h2>Status Snapshot</h2>
+              <p>Current JSON payload</p>
             </div>
-            <button id="copy-payload" type="button" class="ghost-button">复制</button>
+            <button id="copy-payload" type="button" class="ghost-button">Copy</button>
           </div>
           <pre id="payload"></pre>
         </section>
@@ -152,58 +152,95 @@
         <section class="panel control-panel">
           <div class="panel-title">
             <div>
-              <h2>远程控制</h2>
-              <p>执行器目标状态与联动入口</p>
+              <h2>Remote Control</h2>
+              <p>HTTP control path for local dashboard access</p>
             </div>
           </div>
           <div class="control-list">
             <button type="button" class="control-button" data-target="led">
               <span class="control-icon">LED</span>
               <span>
-                <strong>状态指示灯</strong>
-                <small>关闭</small>
+                <strong>Status Lamp</strong>
+                <small>Off</small>
               </span>
             </button>
             <button type="button" class="control-button" data-target="buzzer">
               <span class="control-icon">BUZ</span>
               <span>
-                <strong>蜂鸣器</strong>
-                <small>关闭</small>
+                <strong>Buzzer</strong>
+                <small>Off</small>
               </span>
             </button>
             <button type="button" class="control-button" data-target="relay">
               <span class="control-icon">RLY</span>
               <span>
-                <strong>继电器</strong>
-                <small>关闭</small>
+                <strong>Relay</strong>
+                <small>Off</small>
               </span>
             </button>
           </div>
           <div class="control-summary">
-            <span>联动状态</span>
-            <strong id="control-summary">当前未启用执行器</strong>
+            <span>Control Summary</span>
+            <strong id="control-summary">No actuator is enabled</strong>
           </div>
         </section>
 
         <section class="panel status-panel">
           <div class="panel-title compact">
             <div>
-              <h2>系统状态</h2>
-              <p>运行与接口摘要</p>
+              <h2>System Summary</h2>
+              <p>Device and interface overview</p>
             </div>
           </div>
           <dl class="status-list">
-            <div><dt>错误码</dt><dd id="error-code">0</dd></div>
+            <div><dt>Error Code</dt><dd id="error-code">0</dd></div>
+            <div><dt>Device ID</dt><dd id="device-id">esp32_gateway_001</dd></div>
             <div><dt>HTTP API</dt><dd>/api/status</dd></div>
-            <div><dt>控制接口</dt><dd>/api/control</dd></div>
-            <div><dt>上报 Topic</dt><dd>esp32/gateway/status</dd></div>
+            <div><dt>Control API</dt><dd>/api/control</dd></div>
+            <div><dt>Status Topic</dt><dd id="status-topic">esp32/gateway/esp32_gateway_001/status</dd></div>
           </dl>
+        </section>
+
+        <section class="panel mqtt-viewer-panel">
+          <div class="panel-title compact">
+            <div>
+              <h2>EMQX Serverless Viewer</h2>
+              <p>Subscribe via WSS using a read-only viewer account</p>
+            </div>
+          </div>
+          <div class="mqtt-viewer-form">
+            <label class="mqtt-field" for="mqtt-viewer-host">
+              <span>Host</span>
+              <input id="mqtt-viewer-host" type="text" inputmode="url" placeholder="xxxx.emqxsl.com">
+            </label>
+            <label class="mqtt-field" for="mqtt-viewer-username">
+              <span>Username</span>
+              <input id="mqtt-viewer-username" type="text" autocomplete="username" placeholder="viewer_user">
+            </label>
+            <label class="mqtt-field" for="mqtt-viewer-password">
+              <span>Password</span>
+              <input id="mqtt-viewer-password" type="password" autocomplete="current-password" placeholder="viewer password">
+            </label>
+          </div>
+          <div class="mqtt-viewer-actions">
+            <button id="mqtt-viewer-connect" type="button" class="ghost-button">Connect</button>
+            <button id="mqtt-viewer-disconnect" type="button" class="ghost-button">Disconnect</button>
+          </div>
+          <div class="mqtt-viewer-summary">
+            <span>Viewer Session</span>
+            <strong id="mqtt-viewer-status">Idle</strong>
+            <small id="mqtt-viewer-detail">wss://host:8084/mqtt</small>
+          </div>
+          <div class="mqtt-topic-preview">
+            <span>Subscribed Topics</span>
+            <ul id="mqtt-topic-list"></ul>
+          </div>
         </section>
 
         <section class="panel log-panel">
           <div class="panel-title compact">
-            <h2>事件日志</h2>
-            <button id="clear-log" type="button" class="icon-button" aria-label="清空日志">×</button>
+            <h2>Event Log</h2>
+            <button id="clear-log" type="button" class="icon-button" aria-label="Clear log">×</button>
           </div>
           <ol id="event-log" class="event-log"></ol>
         </section>
@@ -211,6 +248,7 @@
     </section>
   </main>
 
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

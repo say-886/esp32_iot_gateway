@@ -3,6 +3,6 @@
 
 #include "esp_err.h"
 
-esp_err_t app_create_placeholder_tasks(void);
+esp_err_t app_create_tasks(void);
 
 #endif

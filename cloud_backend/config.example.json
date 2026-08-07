@@ -1,0 +1,18 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 3000,
+    "commandTimeoutMs": 30000
+  },
+  "mqtt": {
+    "protocol": "mqtts",
+    "host": "a10f633f.ala.cn-shenzhen.emqxsl.cn",
+    "port": 8883,
+    "clientId": "dashboard_backend_001",
+    "username": "YOUR_EMQX_USERNAME",
+    "password": "YOUR_EMQX_PASSWORD",
+    "rejectUnauthorized": true,
+    "topicRoot": "esp32/gateway",
+    "defaultDeviceId": "esp32_gateway_001"
+  }
+}

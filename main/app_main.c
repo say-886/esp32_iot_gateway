@@ -3,11 +3,13 @@
 #include "board.h"
 #include "button.h"
 #include "device_control.h"
+#include "edge_compute.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "i2c_test.h"
 #include "mqtt_service.h"
 #include "modbus_service.h"
+#include "offline_store.h"
 #include "oled_ssd1306.h"
 #include "ota_service.h"
 #include "sensor_aht20.h"
@@ -25,7 +27,7 @@ static device_status_t g_device_status;
  *
  * 该函数在系统启动时被调用。它负责按照依赖顺序初始化所有硬件组件和软件服务：
  * 1. 初始化共享设备状态内存。
- * 2. 初始化板级硬件（I2C、GPIO等）。
+ * 2. 初始化板级硬件（I2C、GPIO 等）。
  * 3. 初始化执行器控制层和按键输入层。
  * 4. 初始化外设（OLED、AHT20、BH1750）。
  * 5. 初始化 NVS 存储。
@@ -50,11 +52,12 @@ void app_main(void)
              APP_HTTP_API_REBOOT,
              APP_HTTP_API_OTA,
              APP_HTTP_API_MODBUS);
-    ESP_LOGI(TAG, "MQTT topics: %s, %s, %s, %s, %s",
+    ESP_LOGI(TAG, "MQTT topic templates: %s, %s, %s, %s, %s, %s",
              APP_MQTT_TOPIC_STATUS,
              APP_MQTT_TOPIC_SENSOR,
              APP_MQTT_TOPIC_HEARTBEAT,
              APP_MQTT_TOPIC_CMD,
+             APP_MQTT_TOPIC_CMD_ACK,
              APP_MQTT_TOPIC_ERROR);
 
     /* 按依赖顺序启动硬件和共享服务。 */
@@ -65,19 +68,19 @@ void app_main(void)
     return;
 #endif
 
-    ESP_ERROR_CHECK(board_init());  // 初始化板级硬件（I2C、按键GPIO）
-    ESP_ERROR_CHECK(device_control_init()); // 初始化执行器控制层（LED、蜂鸣器、继电器）
-    ESP_ERROR_CHECK(button_init()); // 初始化按键输入层（4个按键）
+    ESP_ERROR_CHECK(board_init());            // 初始化板级硬件（I2C、按键 GPIO）
+    ESP_ERROR_CHECK(device_control_init());   // 初始化执行器控制层（LED、蜂鸣器、继电器）
+    ESP_ERROR_CHECK(button_init());           // 初始化按键输入层（4 个按键）
 
-    esp_err_t oled_ret = oled_init();       // 初始化 OLED 显示（准备显示温湿度看板）
-       if (oled_ret != ESP_OK) {
+    esp_err_t oled_ret = oled_init();         // 初始化 OLED 显示
+    if (oled_ret != ESP_OK) {
         ESP_LOGW(TAG, "OLED init skipped: %s. Check SSD1306 wiring/address.",
                  esp_err_to_name(oled_ret));
     } else {
         ESP_LOGI(TAG, "OLED init OK");
     }
 
-    esp_err_t sensor_ret = aht20_init();     // 初始化 AHT20 温湿度传感器
+    esp_err_t sensor_ret = aht20_init();      // 初始化 AHT20 温湿度传感器
     if (sensor_ret != ESP_OK) {
         ESP_LOGE(TAG, "AHT20 init failed: %s. Check VCC/GND/SDA/SCL wiring.",
                  esp_err_to_name(sensor_ret));
@@ -86,7 +89,7 @@ void app_main(void)
         ESP_LOGI(TAG, "AHT20 init OK");
     }
 
-    sensor_ret = bh1750_init();     // 初始化 BH1750 光敏传感器
+    sensor_ret = bh1750_init();               // 初始化 BH1750 光照传感器
     if (sensor_ret != ESP_OK) {
         ESP_LOGE(TAG, "BH1750 init failed: %s. Check VCC/GND/SDA/SCL wiring.",
                  esp_err_to_name(sensor_ret));
@@ -95,7 +98,13 @@ void app_main(void)
         ESP_LOGI(TAG, "BH1750 init OK");
     }
 
-    ESP_ERROR_CHECK(storage_nvs_init()); // 初始化 NVS 存储（用于存储应用配置和状态快照，如 WiFi 配置、MQTT 主题等）
+    // 初始化 NVS 存储，用于保存应用配置和状态快照，例如 WiFi 配置、MQTT 主题等。
+    ESP_ERROR_CHECK(storage_nvs_init());
+    ESP_ERROR_CHECK(edge_compute_init());
+    esp_err_t offline_ret = offline_store_init();
+    if (offline_ret != ESP_OK) {
+        ESP_LOGW(TAG, "offline telemetry store unavailable: %s", esp_err_to_name(offline_ret));
+    }
     ESP_ERROR_CHECK_WITHOUT_ABORT(modbus_service_init());
 
 #if APP_ENABLE_NETWORK_SERVICES
@@ -109,6 +118,6 @@ void app_main(void)
     ESP_ERROR_CHECK(watchdog_service_init());
 
     /* 平台服务准备完成后，再启动演示任务。 */
-    ESP_ERROR_CHECK(app_create_placeholder_tasks());
+    ESP_ERROR_CHECK(app_create_tasks());
     ESP_ERROR_CHECK_WITHOUT_ABORT(ota_service_confirm_running_image());
 }
