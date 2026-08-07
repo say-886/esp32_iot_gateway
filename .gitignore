@@ -1,6 +1,8 @@
 # ESP-IDF build outputs
 build/
 esp32_iot_gateway/build/
+esp32_iot_gateway/sdkconfig.old
+esp32_iot_gateway/tmp/
 managed_components/
 
 # Python and editor noise
@@ -8,7 +10,16 @@ __pycache__/
 .pytest_cache/
 .vscode/
 node_modules/
+cloud_backend/config.local.json
+cloud_backend/data/
+cloud_backend/node_modules/
+qt_linux_client/build*/
+qt_linux_client/third_party/
 
 # Local logs and temporary files
 *.log
 *.tmp
+output/
+tmp/
+*.pdf
+*.docx

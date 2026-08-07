@@ -2,6 +2,8 @@
 
 基于 ESP32 + ESP-IDF + FreeRTOS + Mongoose 的环境监测与远程控制网关。
 
+当前版本已从基础 MQTT 上传扩展为端边云可靠链路：设备端具备指数退避重连、QoS 1、LWT、流量控制、Flash 离线队列、PUBACK 后出队和本地边缘计算；云端具备多设备登记、遥测幂等、命令状态机；Qt 客户端支持新协议、命令 ACK 和数据库迁移。完整需求与实现边界见 [`docs/reliability_design.md`](docs/reliability_design.md)。
+
 当前阶段已完成 ESP-IDF 环境打通、工程编译烧写监视验证，以及按键、执行器、WiFi、Web API、前端页面、MQTT 主流程联调。当前仍需继续收口 OLED 实机显示、AHT20 长时间稳定性、OTA 和异常恢复等剩余能力。
 
 ## 当前状态
@@ -18,6 +20,10 @@
 | 完整工程模式 | 已恢复 | 默认不再停留在 I2C Test Mode |
 | OLED | 已接入 SSD1306 驱动 | 启动时自动探测 `0x3C/0x3D`，在显示任务中刷新状态 |
 | 降级运行 | 已支持 | AHT20 异常时仍可继续验证 WiFi、Web API、MQTT 与 GPIO 控制 |
+| MQTT 可靠传输 | 已实现并通过构建 | 持久会话、LWT、QoS 1、指数退避、outbox 高水位 |
+| Flash 离线队列 | 已实现并通过构建 | CRC、双元数据日志、单条补传、PUBACK 后出队 |
+| 边缘计算 | 已实现并通过构建 | EMA、阈值规则、传感器突变检测 |
+| 云端设备管理 | 已通过本地接口测试 | SQLite 多设备、遥测去重、命令状态机 |
 
 ## 学习路线
 
@@ -88,6 +94,8 @@ esp32_iot_gateway/
 │   ├── wifi_manager/     # WiFi 管理组件
 │   ├── web_server/      # Web 服务器组件
 │   ├── mqtt_service/    # MQTT 服务组件
+│   ├── offline_store/   # Flash 离线遥测队列
+│   ├── edge_compute/    # 本地平滑与异常检测
 │   ├── storage_nvs/      # NVS 存储组件
 │   ├── watchdog_service/ # 看门狗服务组件
 │   ├── ota_service/     # OTA 服务组件
@@ -163,11 +171,12 @@ component_name/
 
 | Topic | 方向 | 说明 |
 | --- | --- | --- |
-| `esp32/gateway/status` | 上行 | 上报设备整体状态 |
-| `esp32/gateway/sensor` | 上行 | 上报传感器数据 |
-| `esp32/gateway/heartbeat` | 上行 | 上报心跳 |
-| `esp32/gateway/cmd` | 下行 | 接收控制命令 |
-| `esp32/gateway/error` | 上行 | 上报错误信息 |
+| `esp32/gateway/<device_id>/status` | 上行 | 上报设备整体状态与 LWT |
+| `esp32/gateway/<device_id>/sensor` | 上行 | 上报原始、边缘和补传遥测 |
+| `esp32/gateway/<device_id>/heartbeat` | 上行 | 上报心跳和流量指标 |
+| `esp32/gateway/<device_id>/cmd` | 下行 | 接收带 ID/有效期的控制命令 |
+| `esp32/gateway/<device_id>/cmd_ack` | 上行 | 上报命令执行结果 |
+| `esp32/gateway/<device_id>/error` | 上行 | 上报错误信息 |
 
 ## 状态与错误码
 
@@ -225,6 +234,10 @@ component_name/
 | `phy_init` | RF 参数 | 4K |
 | `ota_0` | 应用分区 A | 1536K |
 | `ota_1` | 应用分区 B | 1536K |
+| `telemetry` | 离线遥测队列 | 896K |
+| `coredump` | 崩溃转储 | 64K |
+
+注意：新增 `telemetry` 分区后，旧设备首次部署必须完整烧录分区表；普通 OTA 只更新应用分区，不会创建新数据分区。
 
 当前固件大小约 1.0MB，仍可放入 1.5MB OTA 分区。
 
@@ -297,6 +310,24 @@ ESP-IDF v5.3.2
 target: esp32
 build: passed
 ```
+
+## Qt / Linux 上位机客户端
+
+上位机客户端说明已单独整理到：
+
+- [`qt_linux_client/README.md`](../qt_linux_client/README.md)
+
+当前客户端已覆盖：
+
+- 设备连接
+- 实时监控
+- 执行器控制
+- 配置管理
+- OTA
+- Modbus
+- 本地历史曲线
+- MQTT 增强
+- 设备重启
 
 ## 后续每日任务入口
 

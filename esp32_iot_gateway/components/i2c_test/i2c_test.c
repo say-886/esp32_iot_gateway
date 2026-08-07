@@ -28,7 +28,16 @@ static esp_err_t i2c_test_probe(uint8_t addr)
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
     i2c_master_stop(cmd);
-    esp_err_t ret = i2c_master_cmd_begin(I2C_TEST_PORT, cmd, pdMS_TO_TICKS(I2C_TEST_TIMEOUT_MS));
+
+    esp_err_t ret = board_i2c_lock();
+    if (ret != ESP_OK) {
+        i2c_cmd_link_delete(cmd);
+        return ret;
+    }
+
+    ret = i2c_master_cmd_begin(I2C_TEST_PORT, cmd, pdMS_TO_TICKS(I2C_TEST_TIMEOUT_MS));
+
+    board_i2c_unlock();
     i2c_cmd_link_delete(cmd);
     return ret;
 }
@@ -59,9 +68,16 @@ static void i2c_test_scan(bool *found_aht20, bool *found_bh1750_low, bool *found
 static esp_err_t bh1750_read_lux(uint8_t addr, float *lux)
 {
     const uint8_t cmd = 0x10;
-    esp_err_t ret = i2c_master_write_to_device(I2C_TEST_PORT, addr, &cmd, 1,
-                                               pdMS_TO_TICKS(I2C_TEST_TIMEOUT_MS));
+
+    esp_err_t ret = board_i2c_lock();
     if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = i2c_master_write_to_device(I2C_TEST_PORT, addr, &cmd, 1,
+                                     pdMS_TO_TICKS(I2C_TEST_TIMEOUT_MS));
+    if (ret != ESP_OK) {
+        board_i2c_unlock();
         return ret;
     }
 
@@ -70,6 +86,9 @@ static esp_err_t bh1750_read_lux(uint8_t addr, float *lux)
     uint8_t data[2] = {0};
     ret = i2c_master_read_from_device(I2C_TEST_PORT, addr, data, sizeof(data),
                                       pdMS_TO_TICKS(I2C_TEST_TIMEOUT_MS));
+
+    board_i2c_unlock();
+
     if (ret != ESP_OK) {
         return ret;
     }
@@ -81,11 +100,17 @@ static esp_err_t bh1750_read_lux(uint8_t addr, float *lux)
 
 static esp_err_t aht20_read(float *temperature, float *humidity)
 {
-    uint8_t status = 0;
-    esp_err_t ret = i2c_master_read_from_device(I2C_TEST_PORT, I2C_TEST_AHT20_ADDR,
-                                                &status, 1,
-                                                pdMS_TO_TICKS(I2C_TEST_TIMEOUT_MS));
+    esp_err_t ret = board_i2c_lock();
     if (ret != ESP_OK) {
+        return ret;
+    }
+
+    uint8_t status = 0;
+    ret = i2c_master_read_from_device(I2C_TEST_PORT, I2C_TEST_AHT20_ADDR,
+                                      &status, 1,
+                                      pdMS_TO_TICKS(I2C_TEST_TIMEOUT_MS));
+    if (ret != ESP_OK) {
+        board_i2c_unlock();
         return ret;
     }
 
@@ -95,6 +120,7 @@ static esp_err_t aht20_read(float *temperature, float *humidity)
                                          init_cmd, sizeof(init_cmd),
                                          pdMS_TO_TICKS(I2C_TEST_TIMEOUT_MS));
         if (ret != ESP_OK) {
+            board_i2c_unlock();
             return ret;
         }
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -105,6 +131,7 @@ static esp_err_t aht20_read(float *temperature, float *humidity)
                                      measure_cmd, sizeof(measure_cmd),
                                      pdMS_TO_TICKS(I2C_TEST_TIMEOUT_MS));
     if (ret != ESP_OK) {
+        board_i2c_unlock();
         return ret;
     }
 
@@ -114,6 +141,9 @@ static esp_err_t aht20_read(float *temperature, float *humidity)
     ret = i2c_master_read_from_device(I2C_TEST_PORT, I2C_TEST_AHT20_ADDR,
                                       data, sizeof(data),
                                       pdMS_TO_TICKS(I2C_TEST_TIMEOUT_MS));
+
+    board_i2c_unlock();
+
     if (ret != ESP_OK) {
         return ret;
     }

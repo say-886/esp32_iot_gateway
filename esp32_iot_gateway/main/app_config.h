@@ -19,11 +19,12 @@
 #define APP_HTTP_API_OTA "/api/ota"                /* HTTP OTA 接口，用于通过固件 URL 触发升级。 */
 #define APP_HTTP_API_MODBUS "/api/modbus"          /* Modbus RTU 轮询状态接口。 */
 
-#define APP_MQTT_TOPIC_STATUS "esp32/gateway/status"       /* MQTT 设备状态上报主题。 */
-#define APP_MQTT_TOPIC_SENSOR "esp32/gateway/sensor"       /* MQTT 传感器数据上报主题。 */
-#define APP_MQTT_TOPIC_HEARTBEAT "esp32/gateway/heartbeat" /* MQTT 心跳上报主题。 */
-#define APP_MQTT_TOPIC_CMD "esp32/gateway/cmd"             /* MQTT 控制命令订阅主题。 */
-#define APP_MQTT_TOPIC_ERROR "esp32/gateway/error"         /* MQTT 错误信息上报主题。 */
+#define APP_MQTT_TOPIC_STATUS "esp32/gateway/<device_id>/status"       /* MQTT 设备状态上报主题模板。 */
+#define APP_MQTT_TOPIC_SENSOR "esp32/gateway/<device_id>/sensor"       /* MQTT 传感器数据上报主题模板。 */
+#define APP_MQTT_TOPIC_HEARTBEAT "esp32/gateway/<device_id>/heartbeat" /* MQTT 心跳上报主题模板。 */
+#define APP_MQTT_TOPIC_CMD "esp32/gateway/<device_id>/cmd"             /* MQTT 控制命令订阅主题模板。 */
+#define APP_MQTT_TOPIC_CMD_ACK "esp32/gateway/<device_id>/cmd_ack"     /* MQTT 控制命令执行确认主题模板。 */
+#define APP_MQTT_TOPIC_ERROR "esp32/gateway/<device_id>/error"         /* MQTT 错误信息上报主题模板。 */
 
 #define APP_ENABLE_I2C_TEST_MODE 0      /* I2C 测试模式开关：1 只测试 I2C，0 启动完整工程。 */
 #define APP_ENABLE_NETWORK_SERVICES 1   /* 网络服务开关：1 启动 WiFi/Web/MQTT，0 禁用网络服务。 */
@@ -38,6 +39,6 @@ void app_status_init(device_status_t *status); /* 初始化设备状态，通常
 /**
  * @brief 创建演示骨架中使用的占位 FreeRTOS 任务。
  */
-esp_err_t app_create_placeholder_tasks(void); /* 创建当前项目的 FreeRTOS 业务任务。 */
+esp_err_t app_create_tasks(void); /* 创建当前项目的 FreeRTOS 业务任务。 */
 
 #endif /* APP_CONFIG_H */ /* 结束头文件保护宏。 */

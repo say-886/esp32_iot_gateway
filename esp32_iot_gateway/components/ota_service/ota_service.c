@@ -15,6 +15,15 @@
 
 static const char *TAG = "ota_service";
 
+/**
+ * @brief 启动 OTA 升级流程，从指定 URL 下载新的固件镜像并更新。
+ *
+ * 该函数会使用 ESP HTTPS OTA API 从指定 URL 下载新的固件镜像，并在下载完成后进行验证和安装。
+ * 如果下载或安装过程中发生错误，会返回相应的错误码。
+ *
+ * @param url 固件镜像的 URL 地址，必须是 HTTPS 协议。
+ * @return esp_err_t ESP_OK 成功，其他值表示错误。
+ */
 esp_err_t ota_service_start_http_upgrade(const char *url)
 {
     if (url == NULL || url[0] == '\0') {
@@ -79,7 +88,14 @@ esp_err_t ota_service_start_http_upgrade(const char *url)
     esp_restart();
     return ESP_OK;
 }
-
+/**
+ * @brief 确认当前运行的 OTA 镜像有效，取消回滚标记。
+ *
+ * 该函数会检查当前 OTA 镜像的状态，如果处于待验证状态，则调用 API 确认其有效性。
+ * 如果镜像已经被确认或不处于待验证状态，则直接返回成功。
+ *
+ * @return esp_err_t ESP_OK 成功或无需确认，其他值表示错误。
+ */
 esp_err_t ota_service_confirm_running_image(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();

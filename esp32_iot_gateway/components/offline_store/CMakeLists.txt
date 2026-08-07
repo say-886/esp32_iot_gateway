@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "offline_store.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_partition
+        freertos
+        spi_flash
+)

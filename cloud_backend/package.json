@@ -1,0 +1,17 @@
+{
+  "name": "esp32-iot-gateway-cloud-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ESP32 网关 MQTT 设备管理、遥测与命令状态后端",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.14.1"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

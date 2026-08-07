@@ -92,13 +92,10 @@ static void sensor_task(void *arg)
         humidity = status.humidity;
         light = status.light;
 
-        esp_err_t aht_ret = board_i2c_lock();
-        esp_err_t bh_ret = aht_ret;
-        if (aht_ret == ESP_OK) {
-            aht_ret = aht20_read(&temperature, &humidity);
-            bh_ret = bh1750_read(&light);
-            board_i2c_unlock();
-        }
+        // 直接调用传感器读取函数，它们内部已经有锁保护
+        // 由于使用了递归互斥锁，这样也是安全的
+        esp_err_t aht_ret = aht20_read(&temperature, &humidity);
+        esp_err_t bh_ret = bh1750_read(&light);
 
         if (aht_ret == ESP_OK) {
             aht_fail_count = 0;
@@ -209,23 +206,22 @@ static void mqtt_publish_task(void *arg)
     ESP_ERROR_CHECK_WITHOUT_ABORT(watchdog_service_register_current_task());
     while (true) {
         device_status_get(&status);
-        if (status.mqtt_connected) {
-            publish_elapsed_ms += DISPLAY_UPDATE_PERIOD_MS;
-            heartbeat_elapsed_ms += DISPLAY_UPDATE_PERIOD_MS;
-            if (publish_elapsed_ms >= MQTT_PUBLISH_PERIOD_MS) {
+        publish_elapsed_ms += DISPLAY_UPDATE_PERIOD_MS;
+        heartbeat_elapsed_ms += DISPLAY_UPDATE_PERIOD_MS;
+        if (publish_elapsed_ms >= MQTT_PUBLISH_PERIOD_MS) {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(mqtt_service_queue_sensor(&status));
+            if (status.mqtt_connected) {
                 ESP_ERROR_CHECK_WITHOUT_ABORT(mqtt_service_publish_status(&status));
-                ESP_ERROR_CHECK_WITHOUT_ABORT(mqtt_service_publish_sensor(&status));
                 if (status.error_code != APP_ERR_NONE) {
                     ESP_ERROR_CHECK_WITHOUT_ABORT(mqtt_service_publish_error(&status));
                 }
-                publish_elapsed_ms = 0;
             }
-            if (heartbeat_elapsed_ms >= APP_DEFAULT_HEARTBEAT_PERIOD_MS) {
-                ESP_ERROR_CHECK_WITHOUT_ABORT(mqtt_service_publish_heartbeat(&status));
-                heartbeat_elapsed_ms = 0;
-            }
-        } else {
             publish_elapsed_ms = 0;
+        }
+        if (heartbeat_elapsed_ms >= APP_DEFAULT_HEARTBEAT_PERIOD_MS) {
+            if (status.mqtt_connected) {
+                ESP_ERROR_CHECK_WITHOUT_ABORT(mqtt_service_publish_heartbeat(&status));
+            }
             heartbeat_elapsed_ms = 0;
         }
         ESP_ERROR_CHECK_WITHOUT_ABORT(watchdog_service_feed());
@@ -384,7 +380,7 @@ static esp_err_t create_task_checked(TaskFunction_t task,
     return ESP_OK;
 }
 
-esp_err_t app_create_placeholder_tasks(void)
+esp_err_t app_create_tasks(void)
 {
     esp_err_t err = create_task_checked(sensor_task, s_task_names[0], 4096, 5, &s_task_handles[0]);
     if (err == ESP_OK) err = create_task_checked(display_task, s_task_names[1], 3072, 4, &s_task_handles[1]);

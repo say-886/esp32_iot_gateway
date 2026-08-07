@@ -15,16 +15,39 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "modbus_service.h"
+#include "mqtt_service.h"
 #include "ota_service.h"
 #include "storage_nvs.h"
 
 static const char *TAG = "web_server";
+static const char *MQTT_TOPIC_ROOT = "esp32/gateway";
+static const char *MQTT_WS_PATH = "/mqtt";
+static const uint16_t MQTT_SERVERLESS_WS_PORT = 8084U;
 static httpd_handle_t s_server;
 static volatile bool s_ota_running;
 
 typedef struct {
     char url[192];
 } ota_task_context_t;
+
+static esp_err_t build_device_topic(char *buffer,
+                                    size_t buffer_size,
+                                    const char *device_id,
+                                    const char *suffix)
+{
+    if (buffer == NULL || buffer_size == 0 || device_id == NULL || device_id[0] == '\0' ||
+        suffix == NULL || suffix[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    int len = snprintf(buffer, buffer_size, "%s/%s/%s", MQTT_TOPIC_ROOT, device_id, suffix);
+    if (len < 0 || len >= (int)buffer_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return ESP_OK;
+}
+
 
 static bool constant_time_equal(const char *left, const char *right)
 {
@@ -92,7 +115,7 @@ extern const uint8_t app_js_end[] asm("_binary_app_js_end");
 
 /**
  * @brief 发送嵌入到固件二进制中的静态文件（HTML/CSS/JS）。
- * 
+ *
  * @param req HTTP 请求句柄。
  * @param content_type 文件的 MIME 类型。
  * @param start 文件在内存中的起始地址。
@@ -244,14 +267,66 @@ static bool json_copy_optional_u32(const cJSON *root, const char *key, uint32_t 
 static esp_err_t status_handler(httpd_req_t *req)
 {
     device_status_t status;
+    app_config_t config;
+    char mqtt_status_topic[96];
+    char mqtt_sensor_topic[96];
+    char mqtt_heartbeat_topic[96];
+    char mqtt_error_topic[96];
+    char mqtt_cmd_topic[96];
+    char mqtt_cmd_ack_topic[96];
+    mqtt_service_metrics_t mqtt_metrics;
     device_status_get(&status);
+    mqtt_service_get_metrics(&mqtt_metrics);
 
-    char response[512];
+    if (storage_load_config(&config) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load config failed");
+    }
+
+    if (build_device_topic(mqtt_status_topic,
+                           sizeof(mqtt_status_topic),
+                           config.device_id,
+                           "status") != ESP_OK ||
+        build_device_topic(mqtt_sensor_topic,
+                           sizeof(mqtt_sensor_topic),
+                           config.device_id,
+                           "sensor") != ESP_OK ||
+        build_device_topic(mqtt_heartbeat_topic,
+                           sizeof(mqtt_heartbeat_topic),
+                           config.device_id,
+                           "heartbeat") != ESP_OK ||
+        build_device_topic(mqtt_error_topic,
+                           sizeof(mqtt_error_topic),
+                           config.device_id,
+                           "error") != ESP_OK ||
+        build_device_topic(mqtt_cmd_topic,
+                           sizeof(mqtt_cmd_topic),
+                           config.device_id,
+                           "cmd") != ESP_OK ||
+        build_device_topic(mqtt_cmd_ack_topic,
+                           sizeof(mqtt_cmd_ack_topic),
+                           config.device_id,
+                           "cmd_ack") != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "topic response overflow");
+    }
+
+    /* Topic 按 device_id 展开且包含可靠性/边缘指标，预留足够 JSON 缓冲区。 */
+    char response[2048];
     int len = snprintf(response, sizeof(response),
                        "{\"temperature\":%.1f,\"humidity\":%.1f,\"light\":%.1f,"
                        "\"led\":%d,\"buzzer\":%d,\"relay\":%d,"
                        "\"wifi\":%d,\"mqtt\":%d,\"uptime\":%lu,"
-                       "\"error_code\":%lu,\"error_flags\":%lu,\"firmware\":\"%s\",\"state\":\"%s\"}",
+                       "\"error_code\":%lu,\"error_flags\":%lu,\"firmware\":\"%s\","
+                       "\"state\":\"%s\",\"device_id\":\"%s\",\"mqtt_host\":\"%s\","
+                       "\"mqtt_port\":%u,\"mqtt_use_tls\":%s,\"mqtt_ws_port\":%u,"
+                       "\"mqtt_ws_path\":\"%s\",\"mqtt_status_topic\":\"%s\","
+                       "\"mqtt_sensor_topic\":\"%s\",\"mqtt_heartbeat_topic\":\"%s\","
+                       "\"mqtt_error_topic\":\"%s\",\"mqtt_cmd_topic\":\"%s\","
+                       "\"mqtt_cmd_ack_topic\":\"%s\",\"offline_queue\":%lu,"
+                       "\"offline_capacity\":%lu,\"offline_dropped\":%lu,"
+                       "\"offline_corrupted\":%lu,\"mqtt_outbox_bytes\":%lu,"
+                       "\"edge_temperature_ema\":%.2f,\"edge_humidity_ema\":%.2f,"
+                       "\"edge_light_ema\":%.2f,\"edge_anomaly_flags\":%lu,"
+                       "\"edge_sample_count\":%lu}",
                        status.temperature,
                        status.humidity,
                        status.light,
@@ -264,7 +339,29 @@ static esp_err_t status_handler(httpd_req_t *req)
                        (unsigned long)status.error_code,
                        (unsigned long)status.error_flags,
                        status.firmware_version,
-                       app_state_to_string(status.state));
+                       app_state_to_string(status.state),
+                       config.device_id,
+                       config.mqtt_host,
+                       (unsigned int)config.mqtt_port,
+                       config.mqtt_use_tls ? "true" : "false",
+                       (unsigned int)MQTT_SERVERLESS_WS_PORT,
+                       MQTT_WS_PATH,
+                       mqtt_status_topic,
+                       mqtt_sensor_topic,
+                       mqtt_heartbeat_topic,
+                       mqtt_error_topic,
+                       mqtt_cmd_topic,
+                       mqtt_cmd_ack_topic,
+                       (unsigned long)mqtt_metrics.offline_queued,
+                       (unsigned long)mqtt_metrics.offline_capacity,
+                       (unsigned long)mqtt_metrics.offline_dropped,
+                       (unsigned long)mqtt_metrics.offline_corrupted,
+                       (unsigned long)mqtt_metrics.outbox_bytes,
+                       mqtt_metrics.edge_temperature_ema,
+                       mqtt_metrics.edge_humidity_ema,
+                       mqtt_metrics.edge_light_ema,
+                       (unsigned long)mqtt_metrics.edge_anomaly_flags,
+                       (unsigned long)mqtt_metrics.edge_sample_count);
     if (len < 0 || len >= (int)sizeof(response)) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "status response overflow");
     }

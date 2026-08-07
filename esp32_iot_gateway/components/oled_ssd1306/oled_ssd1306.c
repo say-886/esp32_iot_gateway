@@ -112,6 +112,7 @@ static const uint8_t *oled_get_glyph(char c)
     }
 }
 
+/*** 探测指定 I2C 地址上是否有 OLED 设备响应 ***/
 static esp_err_t oled_probe(uint8_t address)
 {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
@@ -120,11 +121,20 @@ static esp_err_t oled_probe(uint8_t address)
     }
 
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (uint8_t)((address << 1) | I2C_MASTER_WRITE), true);
+    i2c_master_write_byte(cmd, (uint8_t)((address << 1) | I2C_MASTER_WRITE), true); // 发送设备地址并检查 ACK
     i2c_master_stop(cmd);
-    esp_err_t ret = i2c_master_cmd_begin(BOARD_I2C_PORT,
-                                         cmd,
-                                         pdMS_TO_TICKS(OLED_TIMEOUT_MS));
+
+    esp_err_t ret = board_i2c_lock();
+    if (ret != ESP_OK) {
+        i2c_cmd_link_delete(cmd);
+        return ret;
+    }
+
+    ret = i2c_master_cmd_begin(BOARD_I2C_PORT,
+                               cmd,
+                               pdMS_TO_TICKS(OLED_TIMEOUT_MS));
+
+    board_i2c_unlock();
     i2c_cmd_link_delete(cmd);
     return ret;
 }
@@ -132,11 +142,20 @@ static esp_err_t oled_probe(uint8_t address)
 static esp_err_t oled_send_command(uint8_t command)
 {
     uint8_t payload[2] = {0x00, command};
-    return i2c_master_write_to_device(BOARD_I2C_PORT,
+
+    esp_err_t ret = board_i2c_lock();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = i2c_master_write_to_device(BOARD_I2C_PORT,
                                       s_oled_addr,
                                       payload,
                                       sizeof(payload),
                                       pdMS_TO_TICKS(OLED_TIMEOUT_MS));
+
+    board_i2c_unlock();
+    return ret;
 }
 
 static esp_err_t oled_send_buffer(void)
@@ -144,24 +163,49 @@ static esp_err_t oled_send_buffer(void)
     uint8_t payload[17] = {0};
     payload[0] = 0x40;
 
+    esp_err_t ret = board_i2c_lock();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
     for (uint8_t page = 0; page < OLED_PAGE_COUNT; page++) {
-        ESP_RETURN_ON_ERROR(oled_send_command((uint8_t)(0xB0 + page)), TAG, "set page failed");
-        ESP_RETURN_ON_ERROR(oled_send_command(0x00), TAG, "set low column failed");
-        ESP_RETURN_ON_ERROR(oled_send_command(0x10), TAG, "set high column failed");
+        // 注意：oled_send_command 内部也会尝试获取锁，这里我们已经获取了锁，所以需要直接调用 I2C
+        uint8_t cmd_payload[2] = {0x00, (uint8_t)(0xB0 + page)};
+        ret = i2c_master_write_to_device(BOARD_I2C_PORT, s_oled_addr, cmd_payload, 2, pdMS_TO_TICKS(OLED_TIMEOUT_MS));
+        if (ret != ESP_OK) {
+            board_i2c_unlock();
+            return ret;
+        }
+
+        cmd_payload[1] = 0x00;
+        ret = i2c_master_write_to_device(BOARD_I2C_PORT, s_oled_addr, cmd_payload, 2, pdMS_TO_TICKS(OLED_TIMEOUT_MS));
+        if (ret != ESP_OK) {
+            board_i2c_unlock();
+            return ret;
+        }
+
+        cmd_payload[1] = 0x10;
+        ret = i2c_master_write_to_device(BOARD_I2C_PORT, s_oled_addr, cmd_payload, 2, pdMS_TO_TICKS(OLED_TIMEOUT_MS));
+        if (ret != ESP_OK) {
+            board_i2c_unlock();
+            return ret;
+        }
 
         for (int col = 0; col < OLED_WIDTH; col += 16) {
             memcpy(&payload[1], &s_oled_buffer[page * OLED_WIDTH + col], 16);
-            esp_err_t ret = i2c_master_write_to_device(BOARD_I2C_PORT,
-                                                       s_oled_addr,
-                                                       payload,
-                                                       sizeof(payload),
-                                                       pdMS_TO_TICKS(OLED_TIMEOUT_MS));
+            ret = i2c_master_write_to_device(BOARD_I2C_PORT,
+                                             s_oled_addr,
+                                             payload,
+                                             sizeof(payload),
+                                             pdMS_TO_TICKS(OLED_TIMEOUT_MS));
             if (ret != ESP_OK) {
+                board_i2c_unlock();
                 return ret;
             }
         }
     }
 
+    board_i2c_unlock();
     return ESP_OK;
 }
 
@@ -198,6 +242,7 @@ static void oled_draw_text(int page, const char *text)
 
 esp_err_t oled_init(void)
 {
+    // 注意：OLED 的 I2C 地址可能是 0x3C 或 0x3D，取决于硬件接线。我们会尝试两者以找到正确的地址。
     static const uint8_t init_sequence[] = {
         0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40,
         0x8D, 0x14, 0x20, 0x00, 0xA1, 0xC8, 0xDA, 0x12,

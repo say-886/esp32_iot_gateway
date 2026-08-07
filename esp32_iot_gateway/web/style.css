@@ -54,6 +54,7 @@ body::before {
 }
 
 button,
+input,
 meter,
 canvas {
   font: inherit;
@@ -634,6 +635,89 @@ meter::-moz-meter-bar {
 
 .control-summary strong {
   font-size: 14px;
+}
+
+.mqtt-viewer-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.mqtt-viewer-form {
+  display: grid;
+  gap: 10px;
+}
+
+.mqtt-field {
+  display: grid;
+  gap: 6px;
+}
+
+.mqtt-field span,
+.mqtt-topic-preview span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mqtt-field input {
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff, #f7faff);
+  color: var(--text);
+  outline: 0;
+}
+
+.mqtt-field input:focus {
+  border-color: rgba(37, 99, 235, 0.42);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.08);
+}
+
+.mqtt-viewer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.mqtt-viewer-summary,
+.mqtt-topic-preview {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+  display: grid;
+  gap: 6px;
+}
+
+.mqtt-viewer-summary strong {
+  font-size: 14px;
+}
+
+.mqtt-viewer-summary small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+#mqtt-topic-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#mqtt-topic-list li {
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .status-list {

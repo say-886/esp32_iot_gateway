@@ -1,0 +1,13 @@
+<RCC>
+    <qresource prefix="/">
+        <file>main.qml</file>
+        <file>TopBar.qml</file>
+        <file>DashboardPage.qml</file>
+        <file>TelemetryChart.qml</file>
+        <file>LogPanel.qml</file>
+        <file>ControlPage.qml</file>
+        <file>ConfigPage.qml</file>
+        <file>OtaPage.qml</file>
+        <file>ModbusPage.qml</file>
+    </qresource>
+</RCC>

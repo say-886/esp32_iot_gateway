@@ -31,7 +31,7 @@
 #define APP_DEFAULT_MQTT_PORT 8883
 #endif
 #ifndef APP_DEFAULT_MQTT_USE_TLS
-#define APP_DEFAULT_MQTT_USE_TLS false
+#define APP_DEFAULT_MQTT_USE_TLS true
 #endif
 #ifndef APP_DEFAULT_MQTT_USERNAME
 #define APP_DEFAULT_MQTT_USERNAME ""
@@ -270,7 +270,14 @@ esp_err_t storage_nvs_init(void)
     }
     return err;
 }
-
+/**
+ * @brief 启动 MQTT 客户端并连接到服务器。
+ *
+ * 从 NVS 加载 MQTT 连接配置，初始化并启动 MQTT 客户端。
+ * 成功后会更新全局状态以反映 MQTT 连接状态。
+ *
+ * @return esp_err_t ESP_OK 成功。
+ */
 esp_err_t storage_load_config(app_config_t *config)
 {
     if (config == NULL) {

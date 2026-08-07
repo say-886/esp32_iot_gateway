@@ -32,11 +32,19 @@ static esp_err_t aht20_write_command(const uint8_t *command, size_t command_len)
         return ESP_ERR_INVALID_ARG;
     }
 
-    return i2c_master_write_to_device(BOARD_I2C_PORT,                           // I2C 通道
-                                      BOARD_AHT20_I2C_ADDR,             // AHT20 I2C 地址
-                                      command,                              // 命令缓冲区
-                                      command_len,                       // 命令长度
-                                      pdMS_TO_TICKS(AHT20_TIMEOUT_MS)); // 超时时间
+    esp_err_t ret = board_i2c_lock();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = i2c_master_write_to_device(BOARD_I2C_PORT,                           // I2C 通道
+                                     BOARD_AHT20_I2C_ADDR,             // AHT20 I2C 地址
+                                     command,                              // 命令缓冲区
+                                     command_len,                       // 命令长度
+                                     pdMS_TO_TICKS(AHT20_TIMEOUT_MS)); // 超时时间
+
+    board_i2c_unlock();
+    return ret;
 }
 
 /**
@@ -51,11 +59,19 @@ static esp_err_t aht20_read_status(uint8_t *status)
         return ESP_ERR_INVALID_ARG;
     }
 
-    return i2c_master_read_from_device(BOARD_I2C_PORT,
-                                       BOARD_AHT20_I2C_ADDR,
-                                       status,
-                                       1,
-                                       pdMS_TO_TICKS(AHT20_TIMEOUT_MS));
+    esp_err_t ret = board_i2c_lock();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = i2c_master_read_from_device(BOARD_I2C_PORT,
+                                      BOARD_AHT20_I2C_ADDR,
+                                      status,
+                                      1,
+                                      pdMS_TO_TICKS(AHT20_TIMEOUT_MS));
+
+    board_i2c_unlock();
+    return ret;
 }
 
 /**
@@ -221,7 +237,7 @@ esp_err_t aht20_init(void)
             }
         }
 
-        if (aht20_is_calibrated(status)) {
+        if (aht20_is_calibrated(status)) {  // 已校准，初始化成功
             return ESP_OK;
         }
 
@@ -271,11 +287,21 @@ esp_err_t aht20_read(float *temperature, float *humidity)
             continue;
         }
 
+        esp_err_t lock_ret = board_i2c_lock();
+        if (lock_ret != ESP_OK) {
+            ret = lock_ret;
+            (void)aht20_soft_reset();
+            vTaskDelay(pdMS_TO_TICKS(AHT20_RETRY_DELAY_MS));
+            continue;
+        }
+
         ret = i2c_master_read_from_device(BOARD_I2C_PORT,
                                           BOARD_AHT20_I2C_ADDR,
                                           data,
                                           sizeof(data),
                                           pdMS_TO_TICKS(AHT20_TIMEOUT_MS));
+
+        board_i2c_unlock();
         if (ret != ESP_OK) {
             (void)aht20_soft_reset();
             vTaskDelay(pdMS_TO_TICKS(AHT20_RETRY_DELAY_MS));

@@ -9,8 +9,10 @@ idf_component_register(
         app_state
         board
         device_control
+        edge_compute
         i2c_test
         mqtt_service
+        offline_store
         modbus_service
         button
         oled_ssd1306

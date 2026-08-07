@@ -5,8 +5,11 @@ idf_component_register(
         "include"
     REQUIRES
         app_common
+        edge_compute
+        offline_store
         storage_nvs
         mqtt
         mbedtls
         json
+        esp_timer
 )

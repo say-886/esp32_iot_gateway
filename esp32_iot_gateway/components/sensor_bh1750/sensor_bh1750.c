@@ -24,8 +24,17 @@ static uint8_t s_bh1750_addr = BH1750_ADDR_LOW;
 static esp_err_t bh1750_probe(uint8_t addr)
 {
     const uint8_t cmd = BH1750_CMD_CONT_H_RES;
-    return i2c_master_write_to_device(BH1750_I2C_PORT, addr, &cmd, 1,
-                                      pdMS_TO_TICKS(BH1750_TIMEOUT_MS));
+
+    esp_err_t ret = board_i2c_lock();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = i2c_master_write_to_device(BH1750_I2C_PORT, addr, &cmd, 1,
+                                     pdMS_TO_TICKS(BH1750_TIMEOUT_MS));
+
+    board_i2c_unlock();
+    return ret;
 }
 
 /**
@@ -62,20 +71,35 @@ esp_err_t bh1750_read(float *light_lux)
         return ESP_ERR_INVALID_ARG;
     }
 
+    esp_err_t ret = board_i2c_lock();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
     const uint8_t cmd = BH1750_CMD_CONT_H_RES;
-    esp_err_t ret = i2c_master_write_to_device(BH1750_I2C_PORT, s_bh1750_addr,
-                                               &cmd, 1,
-                                               pdMS_TO_TICKS(BH1750_TIMEOUT_MS));
+    ret = i2c_master_write_to_device(BH1750_I2C_PORT, s_bh1750_addr,
+                                     &cmd, 1,
+                                     pdMS_TO_TICKS(BH1750_TIMEOUT_MS));
+    board_i2c_unlock();
+
     if (ret != ESP_OK) {
         return ret;
     }
 
     vTaskDelay(pdMS_TO_TICKS(180));
 
+    ret = board_i2c_lock();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
     uint8_t data[2] = {0};
     ret = i2c_master_read_from_device(BH1750_I2C_PORT, s_bh1750_addr,
                                       data, sizeof(data),
                                       pdMS_TO_TICKS(BH1750_TIMEOUT_MS));
+
+    board_i2c_unlock();
+
     if (ret != ESP_OK) {
         return ret;
     }
