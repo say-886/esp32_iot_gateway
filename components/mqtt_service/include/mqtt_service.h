@@ -25,9 +25,9 @@ esp_err_t mqtt_service_start(void);
 esp_err_t mqtt_service_stop(void);
 /** @brief 发布完整设备状态，QoS 1 且 retain。 */
 esp_err_t mqtt_service_publish_status(const device_status_t *status);
-/** @brief 兼容接口：将传感器数据写入可靠离线队列。 */
+/** @brief 兼容接口：按在线 RAM 直发、异常时 Flash 缓存策略处理传感器数据。 */
 esp_err_t mqtt_service_publish_sensor(const device_status_t *status);
-/** @brief 执行边缘计算并将遥测写入 Flash，联网与否均可调用。 */
+/** @brief 执行边缘计算；在线无积压时从 RAM 直发，断网/积压时才写入 Flash。 */
 esp_err_t mqtt_service_queue_sensor(const device_status_t *status);
 /** @brief 发布设备心跳和队列流量指标。 */
 esp_err_t mqtt_service_publish_heartbeat(const device_status_t *status);

@@ -26,6 +26,8 @@ static const uint16_t MQTT_SERVERLESS_WS_PORT = 8084U;
 static httpd_handle_t s_server;
 static volatile bool s_ota_running;
 
+#define WEB_MIN_API_TOKEN_LENGTH 16U
+
 typedef struct {
     char url[192];
 } ota_task_context_t;
@@ -64,12 +66,37 @@ static bool constant_time_equal(const char *left, const char *right)
     return difference == 0U;
 }
 
+static bool api_token_is_secure(const char *token)
+{
+    return token != NULL && strlen(token) >= WEB_MIN_API_TOKEN_LENGTH &&
+           strcmp(token, "CHANGE_ME_BEFORE_DEPLOYMENT") != 0;
+}
+
+static void set_security_headers(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+    httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
+    httpd_resp_set_hdr(req, "Referrer-Policy", "no-referrer");
+    httpd_resp_set_hdr(req,
+                       "Content-Security-Policy",
+                       "default-src 'self'; object-src 'none'; frame-ancestors 'none'");
+}
+
 static esp_err_t require_api_auth(httpd_req_t *req)
 {
+    set_security_headers(req);
     app_config_t config;
     if (storage_load_config(&config) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load auth config failed");
         return ESP_FAIL;
+    }
+    if (!api_token_is_secure(config.api_token)) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+                           "{\"ok\":false,\"error\":\"secure_token_not_configured\"}");
+        return ESP_ERR_INVALID_STATE;
     }
 
     size_t header_len = httpd_req_get_hdr_value_len(req, "Authorization");
@@ -139,7 +166,7 @@ static esp_err_t send_embedded_file(httpd_req_t *req,
     }
 
     httpd_resp_set_type(req, content_type);
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    set_security_headers(req);
     return httpd_resp_send(req, (const char *)start, length);
 }
 
@@ -266,6 +293,7 @@ static bool json_copy_optional_u32(const cJSON *root, const char *key, uint32_t 
 
 static esp_err_t status_handler(httpd_req_t *req)
 {
+    set_security_headers(req);
     device_status_t status;
     app_config_t config;
     char mqtt_status_topic[96];
@@ -488,7 +516,8 @@ static esp_err_t config_post_handler(httpd_req_t *req)
                  json_copy_optional_u16(root, "modbus_register_count", &config.modbus_register_count) &&
                  json_copy_optional_u32(root, "modbus_baud_rate", &config.modbus_baud_rate) &&
                  json_copy_optional_u32(root, "modbus_poll_period_ms", &config.modbus_poll_period_ms) &&
-                 storage_validate_config(&config) == ESP_OK;
+                 storage_validate_config(&config) == ESP_OK &&
+                 api_token_is_secure(config.api_token);
     uint16_t slave_addr = config.modbus_slave_addr;
     if (valid) {
         valid = json_copy_optional_u16(root, "modbus_slave_addr", &slave_addr) && slave_addr <= 247;
@@ -622,6 +651,14 @@ esp_err_t web_server_start(void)
 {
     if (s_server != NULL) {
         return ESP_OK;
+    }
+
+    app_config_t app_config;
+    if (storage_load_config(&app_config) == ESP_OK && !api_token_is_secure(app_config.api_token)) {
+        ESP_LOGW(TAG,
+                 "HTTP UI starts read-only; mutating APIs stay disabled until a non-default "
+                 "token of at least %u characters is provisioned",
+                 (unsigned int)WEB_MIN_API_TOKEN_LENGTH);
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();

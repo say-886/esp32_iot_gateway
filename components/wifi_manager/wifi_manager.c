@@ -1,26 +1,103 @@
 #include "wifi_manager.h"
 
 #include <string.h>
+#include <time.h>
 
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "device_status.h"
 #include "error_code.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mqtt_service.h"
 #include "storage_nvs.h"
 
 static const char *TAG = "wifi_manager";
-static bool s_wifi_connected;
+static volatile bool s_wifi_connected;
 static bool s_wifi_initialized;
+static bool s_sntp_initialized;
 static esp_timer_handle_t s_reconnect_timer;
 static uint32_t s_reconnect_attempt;
+static TaskHandle_t s_network_gate_task;
 
 #define WIFI_RECONNECT_BASE_MS 1000U        // 基础重连时间，1秒
 #define WIFI_RECONNECT_MAX_MS 30000U        // 最大重连时间，30秒
 #define WIFI_ERROR_THRESHOLD 5U           // 错误阈值，5次重连失败后，重连时间翻倍
+#define NETWORK_GATE_POLL_MS 500U
+#define SNTP_WAIT_TIMEOUT_MS 15000U
+#define VALID_UNIX_TIME 1700000000LL
+
+static bool system_time_is_valid(void)
+{
+    return time(NULL) >= VALID_UNIX_TIME;
+}
+
+static esp_err_t ensure_sntp_started(void)
+{
+    if (s_sntp_initialized) {
+        return ESP_OK;
+    }
+
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_err_t err = esp_netif_sntp_init(&config);
+    if (err == ESP_OK) {
+        s_sntp_initialized = true;
+        ESP_LOGI(TAG, "SNTP started; waiting for trusted system time");
+    }
+    return err;
+}
+
+/**
+ * @brief 将 MQTT 启动门控在 Wi-Fi 和可信时间之后。
+ *
+ * 该任务独立于系统事件循环运行，避免在 IP 事件回调中阻塞。SNTP 保持后台周期
+ * 校时；断网后 MQTT 由事件回调停止，重连并恢复有效时间后再重新启动。
+ */
+static void network_gate_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        if (!s_wifi_connected) {
+            vTaskDelay(pdMS_TO_TICKS(NETWORK_GATE_POLL_MS));
+            continue;
+        }
+
+        esp_err_t err = ensure_sntp_started();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "SNTP init failed: %s", esp_err_to_name(err));
+            vTaskDelay(pdMS_TO_TICKS(SNTP_WAIT_TIMEOUT_MS));
+            continue;
+        }
+
+        while (s_wifi_connected && !system_time_is_valid()) {
+            err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(SNTP_WAIT_TIMEOUT_MS));
+            if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+                ESP_LOGW(TAG, "SNTP wait failed: %s", esp_err_to_name(err));
+            }
+            if (!system_time_is_valid()) {
+                ESP_LOGW(TAG, "trusted time unavailable; MQTT/TLS remains gated");
+            }
+        }
+        if (!s_wifi_connected) {
+            continue;
+        }
+
+        ESP_LOGI(TAG, "system time synchronized; starting MQTT/TLS services");
+        err = mqtt_service_start();
+        if (err != ESP_OK) {
+            device_status_set_error(APP_ERR_MQTT_CONNECT_FAILED);
+            ESP_LOGW(TAG, "mqtt start rejected or failed: %s", esp_err_to_name(err));
+        }
+
+        while (s_wifi_connected) {
+            vTaskDelay(pdMS_TO_TICKS(NETWORK_GATE_POLL_MS));
+        }
+    }
+}
 
 /**
  * @brief 重连定时器回调函数。
@@ -114,12 +191,7 @@ static void wifi_event_handler(void *arg,
         s_reconnect_attempt = 0;
         esp_timer_stop(s_reconnect_timer);
         device_status_update_network(true, false);
-        ESP_LOGI(TAG, "wifi got ip");
-        esp_err_t err = mqtt_service_start();
-        if (err != ESP_OK) {
-            device_status_set_error(APP_ERR_MQTT_CONNECT_FAILED);
-            ESP_LOGW(TAG, "mqtt start failed after got ip: %s", esp_err_to_name(err));
-        }
+        ESP_LOGI(TAG, "wifi got ip; MQTT waits for SNTP time validation");
     }
 }
 
@@ -166,6 +238,15 @@ esp_err_t wifi_manager_init(void)
                                                         NULL));
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    if (s_network_gate_task == NULL &&
+        xTaskCreate(network_gate_task,
+                    "network_gate",
+                    4096,
+                    NULL,
+                    4,
+                    &s_network_gate_task) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
     s_wifi_initialized = true;
     return ESP_OK;
 }

@@ -1045,6 +1045,7 @@ void AppController::sendControlCommand(const QString &target, bool nextValue, co
     command.insert(QStringLiteral("type"), QStringLiteral("control"));
     command.insert(QStringLiteral("created_at"), static_cast<double>(createdAt));
     command.insert(QStringLiteral("expires_at"), static_cast<double>(createdAt + 30000));
+    command.insert(QStringLiteral("auth"), m_token);
     command.insert(QStringLiteral("payload"), control);
 
     if (m_mqttClient.canPublishControl()) {

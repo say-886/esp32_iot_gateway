@@ -267,8 +267,14 @@ bool GatewayMqttClient::publishControl(const QJsonObject &command)
         return false;
     }
 
+    QJsonObject redactedCommand = command;
+    if (redactedCommand.contains(QStringLiteral("auth"))) {
+        redactedCommand.insert(QStringLiteral("auth"), QStringLiteral("***"));
+    }
+    const QByteArray redactedPayload =
+        QJsonDocument(redactedCommand).toJson(QJsonDocument::Compact);
     emit logMessage(QStringLiteral("MQTT 控制已发布到 %1: %2")
-                        .arg(m_commandTopic, QString::fromUtf8(payload)));
+                        .arg(m_commandTopic, QString::fromUtf8(redactedPayload)));
     return true;
 #endif
 }

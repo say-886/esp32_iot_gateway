@@ -1,5 +1,7 @@
 #include "app_config.h"
 
+#include <string.h>
+
 #include "board.h"
 #include "button.h"
 #include "device_control.h"
@@ -21,6 +23,21 @@
 
 static const char *TAG = "app_main";
 static device_status_t g_device_status;
+
+static bool configured_network_requires_time_sync(void)
+{
+#if APP_ENABLE_NETWORK_SERVICES
+    app_config_t config;
+    if (storage_load_config(&config) != ESP_OK) {
+        return false;
+    }
+    return config.wifi_ssid[0] != '\0' &&
+           strcmp(config.wifi_ssid, "YOUR_WIFI_SSID") != 0 &&
+           strcmp(config.wifi_password, "YOUR_WIFI_PASSWORD") != 0;
+#else
+    return false;
+#endif
+}
 
 /**
  * @brief 应用程序主入口。
@@ -119,5 +136,6 @@ void app_main(void)
 
     /* 平台服务准备完成后，再启动演示任务。 */
     ESP_ERROR_CHECK(app_create_tasks());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(ota_service_confirm_running_image());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(
+        ota_service_schedule_health_confirmation(configured_network_requires_time_sync()));
 }

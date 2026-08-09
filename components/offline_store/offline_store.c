@@ -20,6 +20,7 @@
 #define OFFLINE_META_MAGIC 0x4F464D54U
 #define OFFLINE_RECORD_MAGIC 0x4F465243U
 #define OFFLINE_META_VERSION 2U
+#define OFFLINE_DROPPED_PERSIST_INTERVAL 64U
 
 typedef struct {
     uint32_t magic;
@@ -252,7 +253,9 @@ esp_err_t offline_store_append(const offline_store_record_t *record)
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     if (s_meta.count >= s_capacity) {
         s_meta.dropped++;
-        esp_err_t meta_err = persist_meta_locked();
+        esp_err_t meta_err = (s_meta.dropped % OFFLINE_DROPPED_PERSIST_INTERVAL) == 0U
+                                 ? persist_meta_locked()
+                                 : ESP_OK;
         xSemaphoreGive(s_mutex);
         return meta_err == ESP_OK ? ESP_ERR_NO_MEM : meta_err;
     }
@@ -268,7 +271,9 @@ esp_err_t offline_store_append(const offline_store_record_t *record)
         uint32_t tail_sector = s_meta.tail / s_records_per_sector;
         if (s_meta.count > 0U && head_sector == tail_sector) {
             s_meta.dropped++;
-            esp_err_t meta_err = persist_meta_locked();
+            esp_err_t meta_err = (s_meta.dropped % OFFLINE_DROPPED_PERSIST_INTERVAL) == 0U
+                                     ? persist_meta_locked()
+                                     : ESP_OK;
             xSemaphoreGive(s_mutex);
             return meta_err == ESP_OK ? ESP_ERR_NO_MEM : meta_err;
         }

@@ -27,8 +27,14 @@
 #define MQTT_RECONNECT_MAX_MS 30000U
 #define MQTT_REPLAY_PERIOD_MS 500U
 #define MQTT_RECENT_COMMAND_COUNT 8U
+#define MQTT_RAM_QUEUE_CAPACITY 8U
 #define MQTT_CAPTURED_OFFLINE_FLAG (1U << 0)
 #define MQTT_VALID_UNIX_TIME 1700000000LL
+#define MQTT_MIN_API_TOKEN_LENGTH 16U
+
+#ifndef APP_ALLOW_INSECURE_DEMO_MQTT
+#define APP_ALLOW_INSECURE_DEMO_MQTT 0
+#endif
 
 static const char *TAG = "mqtt_service";
 static const char *MQTT_TOPIC_STATUS_SUFFIX = "status";
@@ -48,9 +54,14 @@ static TaskHandle_t s_replay_task;
 static esp_timer_handle_t s_reconnect_timer;
 static bool s_connected;
 static bool s_stopping;
+static bool s_config_rejected;
 static uint32_t s_reconnect_attempt;
 static int s_inflight_msg_id = -1;
 static uint32_t s_inflight_sequence;
+static bool s_inflight_from_flash;
+static offline_store_record_t s_ram_queue[MQTT_RAM_QUEUE_CAPACITY];
+static uint32_t s_ram_queue_head;
+static uint32_t s_ram_queue_count;
 static uint32_t s_boot_id;
 static uint32_t s_sequence;
 static char s_recent_cmd_ids[MQTT_RECENT_COMMAND_COUNT][64];
@@ -65,6 +76,7 @@ static char s_topic_heartbeat[96];
 static char s_topic_cmd[96];
 static char s_topic_cmd_ack[96];
 static char s_topic_error[96];
+static char s_command_token[64];
 
 /** @brief 获取 MQTT 运行状态互斥锁。 */
 static void state_lock(void)
@@ -79,6 +91,90 @@ static void state_unlock(void)
     if (s_state_mutex != NULL) {
         xSemaphoreGive(s_state_mutex);
     }
+}
+
+static bool constant_time_equal(const char *left, const char *right)
+{
+    if (left == NULL || right == NULL) {
+        return false;
+    }
+    size_t left_len = strlen(left);
+    size_t right_len = strlen(right);
+    size_t max_len = left_len > right_len ? left_len : right_len;
+    unsigned char difference = (unsigned char)(left_len ^ right_len);
+    for (size_t i = 0; i < max_len; ++i) {
+        unsigned char left_value = i < left_len ? (unsigned char)left[i] : 0U;
+        unsigned char right_value = i < right_len ? (unsigned char)right[i] : 0U;
+        difference |= left_value ^ right_value;
+    }
+    return difference == 0U;
+}
+
+static bool api_token_is_secure(const char *token)
+{
+    return token != NULL && strlen(token) >= MQTT_MIN_API_TOKEN_LENGTH &&
+           strcmp(token, "CHANGE_ME_BEFORE_DEPLOYMENT") != 0;
+}
+
+static bool mqtt_host_is_public_demo(const char *host)
+{
+    return host != NULL &&
+           (strcmp(host, "broker.emqx.io") == 0 ||
+            strcmp(host, "test.mosquitto.org") == 0 ||
+            strcmp(host, "broker.hivemq.com") == 0);
+}
+
+static esp_err_t validate_secure_mqtt_config(const app_config_t *config)
+{
+    if (config == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+#if APP_ALLOW_INSECURE_DEMO_MQTT
+    ESP_LOGW(TAG, "insecure demo MQTT mode is explicitly enabled");
+    return ESP_OK;
+#else
+    if (!config->mqtt_use_tls) {
+        ESP_LOGE(TAG, "MQTT rejected: TLS is required");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (mqtt_host_is_public_demo(config->mqtt_host)) {
+        ESP_LOGE(TAG, "MQTT rejected: public demo broker is not allowed in secure mode");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (config->mqtt_username[0] == '\0' || config->mqtt_password[0] == '\0') {
+        ESP_LOGE(TAG, "MQTT rejected: broker username and password are required");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!api_token_is_secure(config->api_token)) {
+        ESP_LOGE(TAG, "MQTT rejected: API token is default or shorter than %u characters",
+                 (unsigned int)MQTT_MIN_API_TOKEN_LENGTH);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+#endif
+}
+
+static uint32_t ram_queue_index(uint32_t offset)
+{
+    return (s_ram_queue_head + offset) % MQTT_RAM_QUEUE_CAPACITY;
+}
+
+/** @brief 断线或主动停止时按原顺序把 RAM 遥测落入 Flash。调用者持有状态锁。 */
+static void persist_ram_queue_locked(void)
+{
+    for (uint32_t i = 0; i < s_ram_queue_count; ++i) {
+        offline_store_record_t record = s_ram_queue[ram_queue_index(i)];
+        record.flags |= MQTT_CAPTURED_OFFLINE_FLAG;
+        esp_err_t err = offline_store_append(&record);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "RAM telemetry persist failed: sequence=%lu error=%s",
+                     (unsigned long)record.sequence,
+                     esp_err_to_name(err));
+        }
+    }
+    s_ram_queue_head = 0U;
+    s_ram_queue_count = 0U;
 }
 
 static esp_err_t mqtt_build_topic(char *buffer,
@@ -239,10 +335,13 @@ static void handle_control_payload(const char *body, int len)
     }
 
     const cJSON *cmd_id_item = cJSON_GetObjectItemCaseSensitive(root, "cmd_id");
-    if (cJSON_IsString(cmd_id_item) && cmd_id_item->valuestring != NULL) {
+    if (cJSON_IsString(cmd_id_item) && cmd_id_item->valuestring != NULL &&
+        cmd_id_item->valuestring[0] != '\0') {
         snprintf(cmd_id, sizeof(cmd_id), "%s", cmd_id_item->valuestring);
     } else {
-        snprintf(cmd_id, sizeof(cmd_id), "legacy-%08lx", (unsigned long)esp_random());
+        cJSON_Delete(root);
+        publish_command_ack("unknown", "rejected", ESP_ERR_INVALID_ARG);
+        return;
     }
 
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
@@ -252,10 +351,28 @@ static void handle_control_payload(const char *body, int len)
         return;
     }
 
+    const cJSON *auth = cJSON_GetObjectItemCaseSensitive(root, "auth");
+    if (!cJSON_IsString(auth) || auth->valuestring == NULL ||
+        !constant_time_equal(auth->valuestring, s_command_token)) {
+        cJSON_Delete(root);
+        ESP_LOGW(TAG, "MQTT command authentication failed: %s", cmd_id);
+        publish_command_ack(cmd_id, "unauthorized", ESP_ERR_INVALID_STATE);
+        return;
+    }
+
     const cJSON *expires_at = cJSON_GetObjectItemCaseSensitive(root, "expires_at");
     time_t now = time(NULL);
-    if (cJSON_IsNumber(expires_at) && now >= MQTT_VALID_UNIX_TIME &&
-        expires_at->valuedouble > 0 && (double)now * 1000.0 > expires_at->valuedouble) {
+    if (!cJSON_IsNumber(expires_at) || expires_at->valuedouble <= 0) {
+        cJSON_Delete(root);
+        publish_command_ack(cmd_id, "rejected", ESP_ERR_INVALID_ARG);
+        return;
+    }
+    if (now < MQTT_VALID_UNIX_TIME) {
+        cJSON_Delete(root);
+        publish_command_ack(cmd_id, "time_unavailable", ESP_ERR_INVALID_STATE);
+        return;
+    }
+    if ((double)now * 1000.0 > expires_at->valuedouble) {
         cJSON_Delete(root);
         publish_command_ack(cmd_id, "expired", ESP_ERR_TIMEOUT);
         return;
@@ -383,7 +500,9 @@ static void mqtt_event_handler(void *handler_args,
         ESP_LOGW(TAG, "MQTT disconnected");
         state_lock();
         s_connected = false;
+        persist_ram_queue_locked();
         s_inflight_msg_id = -1;
+        s_inflight_from_flash = false;
         bool stopping = s_stopping;
         state_unlock();
         device_status_update_network(true, false);
@@ -393,23 +512,40 @@ static void mqtt_event_handler(void *handler_args,
         break;
     case MQTT_EVENT_PUBLISHED: {
         bool telemetry_acked = false;
+        bool from_flash = false;
         uint32_t sequence = 0;
         state_lock();
         if (s_inflight_msg_id >= 0 && event->msg_id == s_inflight_msg_id) {
             telemetry_acked = true;
+            from_flash = s_inflight_from_flash;
             sequence = s_inflight_sequence;
             s_inflight_msg_id = -2;
         }
         state_unlock();
         if (telemetry_acked) {
-            esp_err_t pop_err = offline_store_pop();
-            if (pop_err != ESP_OK) {
-                ESP_LOGW(TAG, "offline queue pop failed after ACK: %s", esp_err_to_name(pop_err));
+            if (from_flash) {
+                esp_err_t pop_err = offline_store_pop();
+                if (pop_err != ESP_OK) {
+                    ESP_LOGW(TAG, "offline queue pop failed after ACK: %s", esp_err_to_name(pop_err));
+                }
             } else {
-                ESP_LOGD(TAG, "telemetry ACKed: sequence=%lu", (unsigned long)sequence);
+                state_lock();
+                if (s_ram_queue_count > 0U &&
+                    s_ram_queue[s_ram_queue_head].sequence == sequence) {
+                    s_ram_queue_head = (s_ram_queue_head + 1U) % MQTT_RAM_QUEUE_CAPACITY;
+                    s_ram_queue_count--;
+                } else {
+                    ESP_LOGW(TAG, "RAM telemetry ACK order mismatch: sequence=%lu",
+                             (unsigned long)sequence);
+                }
+                state_unlock();
             }
+            ESP_LOGD(TAG, "telemetry ACKed: sequence=%lu source=%s",
+                     (unsigned long)sequence,
+                     from_flash ? "flash" : "ram");
             state_lock();
             s_inflight_msg_id = -1;
+            s_inflight_from_flash = false;
             state_unlock();
         }
         break;
@@ -428,13 +564,16 @@ static void mqtt_event_handler(void *handler_args,
     }
 }
 
-/** @brief 将离线队首编码为版本化 JSON 并限制为单条 QoS 1 inflight。 */
-static esp_err_t publish_queued_record(const offline_store_record_t *record)
+static int encode_telemetry_payload(const offline_store_record_t *record,
+                                    char *payload,
+                                    size_t payload_size)
 {
-    char payload[448];
+    if (record == NULL || payload == NULL || payload_size == 0U) {
+        return -1;
+    }
     bool time_valid = record->timestamp_ms > 0ULL;
     int len = snprintf(payload,
-                       sizeof(payload),
+                       payload_size,
                        "{\"schema\":1,\"device_id\":\"%s\",\"boot_id\":%lu,"
                        "\"seq\":%lu,\"timestamp\":%llu,\"time_valid\":%s,"
                        "\"uptime_ms\":%lu000,\"replayed\":%s,"
@@ -456,7 +595,15 @@ static esp_err_t publish_queued_record(const offline_store_record_t *record)
                        record->light_ema,
                        (unsigned long)record->edge_anomaly_flags,
                        (unsigned long)record->error_code);
-    if (len < 0 || len >= (int)sizeof(payload)) {
+    return len >= 0 && len < (int)payload_size ? len : -1;
+}
+
+/** @brief 将 Flash 队首编码为版本化 JSON 并限制为单条 QoS 1 inflight。 */
+static esp_err_t publish_queued_record(const offline_store_record_t *record)
+{
+    char payload[448];
+    int len = encode_telemetry_payload(record, payload, sizeof(payload));
+    if (len < 0) {
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -470,6 +617,35 @@ static esp_err_t publish_queued_record(const offline_store_record_t *record)
     if (msg_id >= 0) {
         s_inflight_msg_id = msg_id;
         s_inflight_sequence = record->sequence;
+        s_inflight_from_flash = true;
+    }
+    state_unlock();
+    return msg_id >= 0 ? ESP_OK : ESP_FAIL;
+}
+
+/** @brief 在线无积压时直接从 RAM 发布，收到 PUBACK 后才释放队首。 */
+static esp_err_t publish_ram_record(void)
+{
+    char payload[448];
+    state_lock();
+    if (!s_connected || s_stopping || s_client == NULL || s_inflight_msg_id != -1 ||
+        s_ram_queue_count == 0U ||
+        esp_mqtt_client_get_outbox_size(s_client) >= MQTT_REPLAY_OUTBOX_HIGH_WATER) {
+        state_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const offline_store_record_t *record = &s_ram_queue[s_ram_queue_head];
+    int len = encode_telemetry_payload(record, payload, sizeof(payload));
+    if (len < 0) {
+        state_unlock();
+        return ESP_ERR_INVALID_SIZE;
+    }
+    int msg_id = esp_mqtt_client_publish(s_client, s_topic_sensor, payload, len, 1, 0);
+    if (msg_id >= 0) {
+        s_inflight_msg_id = msg_id;
+        s_inflight_sequence = record->sequence;
+        s_inflight_from_flash = false;
     }
     state_unlock();
     return msg_id >= 0 ? ESP_OK : ESP_FAIL;
@@ -487,17 +663,26 @@ static void mqtt_replay_task(void *arg)
     while (true) {
         state_lock();
         bool can_publish = s_connected && !s_stopping && s_client != NULL && s_inflight_msg_id == -1;
+        bool ram_pending = s_ram_queue_count > 0U;
         state_unlock();
         if (can_publish) {
-            offline_store_record_t record;
-            esp_err_t err = offline_store_peek(&record);
-            if (err == ESP_ERR_INVALID_CRC) {
-                ESP_LOGW(TAG, "dropping corrupted offline record");
-                offline_store_pop();
-            } else if (err == ESP_OK) {
-                err = publish_queued_record(&record);
+            esp_err_t err = ESP_OK;
+            if (ram_pending) {
+                err = publish_ram_record();
                 if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-                    ESP_LOGW(TAG, "telemetry replay failed: %s", esp_err_to_name(err));
+                    ESP_LOGW(TAG, "RAM telemetry publish failed: %s", esp_err_to_name(err));
+                }
+            } else {
+                offline_store_record_t record;
+                err = offline_store_peek(&record);
+                if (err == ESP_ERR_INVALID_CRC) {
+                    ESP_LOGW(TAG, "dropping corrupted offline record");
+                    offline_store_pop();
+                } else if (err == ESP_OK) {
+                    err = publish_queued_record(&record);
+                    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+                        ESP_LOGW(TAG, "telemetry replay failed: %s", esp_err_to_name(err));
+                    }
                 }
             }
         }
@@ -543,9 +728,23 @@ esp_err_t mqtt_service_start(void)
     if (err != ESP_OK) {
         return err;
     }
+    err = validate_secure_mqtt_config(&config);
+    if (err != ESP_OK) {
+        state_lock();
+        s_config_rejected = true;
+        state_unlock();
+        return err;
+    }
+    state_lock();
+    s_config_rejected = false;
+    state_unlock();
     err = mqtt_prepare_topics(config.device_id);
     if (err != ESP_OK) {
         return err;
+    }
+    int token_len = snprintf(s_command_token, sizeof(s_command_token), "%s", config.api_token);
+    if (token_len < 0 || token_len >= (int)sizeof(s_command_token)) {
+        return ESP_ERR_INVALID_SIZE;
     }
 
     int uri_len = snprintf(s_broker_uri,
@@ -591,6 +790,9 @@ esp_err_t mqtt_service_start(void)
     s_connected = false;
     s_stopping = false;
     s_inflight_msg_id = -1;
+    s_inflight_from_flash = false;
+    s_ram_queue_head = 0U;
+    s_ram_queue_count = 0U;
     state_unlock();
 
     err = esp_mqtt_client_start(client);
@@ -623,8 +825,10 @@ esp_err_t mqtt_service_stop(void)
     }
     s_stopping = true;
     s_connected = false;
+    persist_ram_queue_locked();
     s_client = NULL;
     s_inflight_msg_id = -1;
+    s_inflight_from_flash = false;
     state_unlock();
 
     if (s_reconnect_timer != NULL) {
@@ -641,6 +845,12 @@ esp_err_t mqtt_service_queue_sensor(const device_status_t *status)
     if (status == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    state_lock();
+    bool config_rejected = s_config_rejected;
+    state_unlock();
+    if (config_rejected) {
+        return ESP_ERR_INVALID_STATE;
+    }
     time_t now = time(NULL);
     edge_compute_result_t edge = {0};
     esp_err_t edge_err = edge_compute_process(status->temperature,
@@ -651,12 +861,15 @@ esp_err_t mqtt_service_queue_sensor(const device_status_t *status)
         ESP_LOGW(TAG, "edge compute failed: %s", esp_err_to_name(edge_err));
     }
     state_lock();
-    bool connected = s_connected && !s_stopping;
+    if (s_boot_id == 0U) {
+        s_boot_id = esp_random();
+    }
     uint32_t sequence = ++s_sequence;
+    uint32_t boot_id = s_boot_id;
     state_unlock();
 
     offline_store_record_t record = {
-        .boot_id = s_boot_id,
+        .boot_id = boot_id,
         .sequence = sequence,
         .uptime_sec = status->uptime_sec,
         .timestamp_ms = now >= MQTT_VALID_UNIX_TIME ? (uint64_t)now * 1000ULL : 0ULL,
@@ -668,8 +881,35 @@ esp_err_t mqtt_service_queue_sensor(const device_status_t *status)
         .light_ema = edge.light_ema,
         .edge_anomaly_flags = edge.anomaly_flags,
         .error_code = status->error_code,
-        .flags = connected ? 0U : MQTT_CAPTURED_OFFLINE_FLAG,
+        .flags = 0U,
     };
+
+    offline_store_stats_t stats;
+    offline_store_get_stats(&stats);
+    state_lock();
+    bool connected = s_connected && !s_stopping && s_client != NULL;
+    if (connected && stats.queued == 0U && s_ram_queue_count < MQTT_RAM_QUEUE_CAPACITY) {
+        s_ram_queue[ram_queue_index(s_ram_queue_count)] = record;
+        s_ram_queue_count++;
+        state_unlock();
+        return ESP_OK;
+    }
+    if (connected && stats.queued == 0U && s_ram_queue_count >= MQTT_RAM_QUEUE_CAPACITY) {
+        ESP_LOGW(TAG, "RAM telemetry queue saturated; spilling ordered batch to Flash");
+        persist_ram_queue_locked();
+        if (s_inflight_msg_id >= 0) {
+            s_inflight_from_flash = true;
+        }
+        record.flags |= MQTT_CAPTURED_OFFLINE_FLAG;
+        esp_err_t spill_err = offline_store_append(&record);
+        state_unlock();
+        return spill_err;
+    }
+    if (!connected) {
+        record.flags |= MQTT_CAPTURED_OFFLINE_FLAG;
+    }
+    state_unlock();
+
     esp_err_t err = offline_store_append(&record);
     if (err == ESP_ERR_NO_MEM) {
         ESP_LOGW(TAG, "offline telemetry queue full; newest sample dropped");
