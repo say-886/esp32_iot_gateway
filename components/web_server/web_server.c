@@ -18,6 +18,7 @@
 #include "mqtt_service.h"
 #include "ota_service.h"
 #include "storage_nvs.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "web_server";
 static const char *MQTT_TOPIC_ROOT = "esp32/gateway";
@@ -32,6 +33,14 @@ typedef struct {
     char url[192];
 } ota_task_context_t;
 
+/**
+ * @brief 根据设备 ID 和后缀生成 MQTT 主题。
+ * @param buffer 输出主题缓冲区。
+ * @param buffer_size 输出缓冲区大小。
+ * @param device_id 设备 ID。
+ * @param suffix 主题后缀。
+ * @return esp_err_t 生成成功返回 ESP_OK，否则返回错误码。
+ */
 static esp_err_t build_device_topic(char *buffer,
                                     size_t buffer_size,
                                     const char *device_id,
@@ -51,6 +60,12 @@ static esp_err_t build_device_topic(char *buffer,
 }
 
 
+/**
+ * @brief 使用常量时间方式比较两个字符串是否相等。
+ * @param left 左侧字符串。
+ * @param right 右侧字符串。
+ * @return bool 两个字符串相等时返回 true。
+ */
 static bool constant_time_equal(const char *left, const char *right)
 {
     size_t left_len = strlen(left);
@@ -66,12 +81,41 @@ static bool constant_time_equal(const char *left, const char *right)
     return difference == 0U;
 }
 
+/**
+ * @brief 检查 API Token 是否满足安全配置要求。
+ * @param token 待检查的 API Token。
+ * @return bool Token 合规时返回 true。
+ */
 static bool api_token_is_secure(const char *token)
 {
     return token != NULL && strlen(token) >= WEB_MIN_API_TOKEN_LENGTH &&
            strcmp(token, "CHANGE_ME_BEFORE_DEPLOYMENT") != 0;
 }
 
+static void set_security_headers(httpd_req_t *req);
+static esp_err_t require_api_auth(httpd_req_t *req);
+
+static bool wifi_credentials_are_configured(const app_config_t *config)
+{
+    return config != NULL && config->wifi_ssid[0] != '\0' &&
+           strcmp(config->wifi_ssid, "YOUR_WIFI_SSID") != 0 &&
+           strcmp(config->wifi_password, "YOUR_WIFI_PASSWORD") != 0;
+}
+
+static esp_err_t require_config_auth(httpd_req_t *req)
+{
+    /* 首次配网时设备只在本地 SoftAP 上，允许配置接口完成凭据注入。 */
+    if (wifi_manager_is_provisioning()) {
+        set_security_headers(req);
+        return ESP_OK;
+    }
+    return require_api_auth(req);
+}
+
+/**
+ * @brief 为 HTTP 响应设置安全相关请求头。
+ * @param req 当前 HTTP 请求句柄。
+ */
 static void set_security_headers(httpd_req_t *req)
 {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -83,6 +127,11 @@ static void set_security_headers(httpd_req_t *req)
                        "default-src 'self'; object-src 'none'; frame-ancestors 'none'");
 }
 
+/**
+ * @brief 校验 HTTP 请求中的 Bearer Token。
+ * @param req 当前 HTTP 请求句柄。
+ * @return esp_err_t 鉴权成功返回 ESP_OK，否则返回错误码。
+ */
 static esp_err_t require_api_auth(httpd_req_t *req)
 {
     set_security_headers(req);
@@ -119,6 +168,10 @@ static esp_err_t require_api_auth(httpd_req_t *req)
     return ESP_ERR_INVALID_STATE;
 }
 
+/**
+ * @brief 执行异步 OTA 升级任务。
+ * @param arg OTA 任务上下文指针。
+ */
 static void ota_upgrade_task(void *arg)
 {
     ota_task_context_t *context = (ota_task_context_t *)arg;
@@ -149,6 +202,14 @@ extern const uint8_t app_js_end[] asm("_binary_app_js_end");
  * @param end 文件在内存中的结束地址。
  * @return esp_err_t ESP_OK 成功。
  */
+/**
+ * @brief 发送编译时嵌入固件的静态文件。
+ * @param req HTTP 请求句柄。
+ * @param content_type 文件 MIME 类型。
+ * @param start 文件数据起始地址。
+ * @param end 文件数据结束地址。
+ * @return esp_err_t 文件发送结果。
+ */
 static esp_err_t send_embedded_file(httpd_req_t *req,
                                     const char *content_type,
                                     const uint8_t *start,
@@ -173,6 +234,11 @@ static esp_err_t send_embedded_file(httpd_req_t *req,
 /**
  * @brief 首页 HTML 处理函数。
  */
+/**
+ * @brief 处理首页 HTML 请求。
+ * @param req HTTP 请求句柄。
+ * @return esp_err_t HTML 文件发送结果。
+ */
 static esp_err_t index_handler(httpd_req_t *req)
 {
     return send_embedded_file(req, "text/html; charset=utf-8", index_html_start, index_html_end);
@@ -180,6 +246,11 @@ static esp_err_t index_handler(httpd_req_t *req)
 
 /**
  * @brief CSS 样式表处理函数。
+ */
+/**
+ * @brief 处理 CSS 样式表请求。
+ * @param req HTTP 请求句柄。
+ * @return esp_err_t CSS 文件发送结果。
  */
 static esp_err_t style_handler(httpd_req_t *req)
 {
@@ -189,6 +260,11 @@ static esp_err_t style_handler(httpd_req_t *req)
 /**
  * @brief JavaScript 脚本处理函数。
  */
+/**
+ * @brief 处理 JavaScript 脚本请求。
+ * @param req HTTP 请求句柄。
+ * @return esp_err_t JavaScript 文件发送结果。
+ */
 static esp_err_t script_handler(httpd_req_t *req)
 {
     return send_embedded_file(req, "application/javascript; charset=utf-8", app_js_start, app_js_end);
@@ -196,6 +272,13 @@ static esp_err_t script_handler(httpd_req_t *req)
 
 /**
  * @brief 检查 JSON 请求体中是否包含指定的键。
+ */
+/**
+ * @brief 接收完整的 HTTP 请求体。
+ * @param req HTTP 请求句柄。
+ * @param body 请求体输出缓冲区。
+ * @param body_size 输出缓冲区大小。
+ * @return esp_err_t 接收成功返回 ESP_OK，否则返回错误码。
  */
 static esp_err_t receive_request_body(httpd_req_t *req, char *body, size_t body_size)
 {
@@ -220,6 +303,14 @@ static esp_err_t receive_request_body(httpd_req_t *req, char *body, size_t body_
     return ESP_OK;
 }
 
+/**
+ * @brief 从 JSON 对象中读取布尔字段。
+ * @param root JSON 根对象。
+ * @param key JSON 字段名。
+ * @param present 输出字段是否存在。
+ * @param value 输出布尔值。
+ * @return bool 字段有效或不存在时返回 true。
+ */
 static bool json_get_bool(const cJSON *root, const char *key, bool *present, bool *value)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
@@ -238,6 +329,14 @@ static bool json_get_bool(const cJSON *root, const char *key, bool *present, boo
     return false;
 }
 
+/**
+ * @brief 读取可选 JSON 字符串并复制到输出缓冲区。
+ * @param root JSON 根对象。
+ * @param key JSON 字段名。
+ * @param out 字符串输出缓冲区。
+ * @param out_size 输出缓冲区大小。
+ * @return bool 字段不存在或复制成功时返回 true。
+ */
 static bool json_copy_optional_string(const cJSON *root, const char *key, char *out, size_t out_size)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
@@ -252,6 +351,13 @@ static bool json_copy_optional_string(const cJSON *root, const char *key, char *
     return true;
 }
 
+/**
+ * @brief 读取范围为 1 到 65535 的可选无符号整数。
+ * @param root JSON 根对象。
+ * @param key JSON 字段名。
+ * @param out 整数输出地址。
+ * @return bool 字段不存在或数值有效时返回 true。
+ */
 static bool json_copy_optional_u16(const cJSON *root, const char *key, uint16_t *out)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
@@ -265,6 +371,13 @@ static bool json_copy_optional_u16(const cJSON *root, const char *key, uint16_t 
     return true;
 }
 
+/**
+ * @brief 读取范围为 0 到 65535 的可选无符号整数。
+ * @param root JSON 根对象。
+ * @param key JSON 字段名。
+ * @param out 整数输出地址。
+ * @return bool 字段不存在或数值有效时返回 true。
+ */
 static bool json_copy_optional_u16_allow_zero(const cJSON *root, const char *key, uint16_t *out)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
@@ -278,6 +391,13 @@ static bool json_copy_optional_u16_allow_zero(const cJSON *root, const char *key
     return true;
 }
 
+/**
+ * @brief 读取范围为 0 到 UINT32_MAX 的可选无符号整数。
+ * @param root JSON 根对象。
+ * @param key JSON 字段名。
+ * @param out 整数输出地址。
+ * @return bool 字段不存在或数值有效时返回 true。
+ */
 static bool json_copy_optional_u32(const cJSON *root, const char *key, uint32_t *out)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
@@ -351,7 +471,9 @@ static esp_err_t status_handler(httpd_req_t *req)
                        "\"mqtt_error_topic\":\"%s\",\"mqtt_cmd_topic\":\"%s\","
                        "\"mqtt_cmd_ack_topic\":\"%s\",\"offline_queue\":%lu,"
                        "\"offline_capacity\":%lu,\"offline_dropped\":%lu,"
-                       "\"offline_corrupted\":%lu,\"mqtt_outbox_bytes\":%lu,"
+                       "\"offline_corrupted\":%lu,\"offline_meta_erase_count\":%lu,"
+                       "\"offline_data_erase_count\":%lu,\"offline_faulted\":%d,"
+                       "\"offline_last_error\":%ld,\"mqtt_outbox_bytes\":%lu,"
                        "\"edge_temperature_ema\":%.2f,\"edge_humidity_ema\":%.2f,"
                        "\"edge_light_ema\":%.2f,\"edge_anomaly_flags\":%lu,"
                        "\"edge_sample_count\":%lu}",
@@ -384,6 +506,10 @@ static esp_err_t status_handler(httpd_req_t *req)
                        (unsigned long)mqtt_metrics.offline_capacity,
                        (unsigned long)mqtt_metrics.offline_dropped,
                        (unsigned long)mqtt_metrics.offline_corrupted,
+                       (unsigned long)mqtt_metrics.offline_meta_erase_count,
+                       (unsigned long)mqtt_metrics.offline_data_erase_count,
+                       mqtt_metrics.offline_faulted ? 1 : 0,
+                       (long)mqtt_metrics.offline_last_error,
                        (unsigned long)mqtt_metrics.outbox_bytes,
                        mqtt_metrics.edge_temperature_ema,
                        mqtt_metrics.edge_humidity_ema,
@@ -440,7 +566,7 @@ static esp_err_t control_handler(httpd_req_t *req)
 
 static esp_err_t config_get_handler(httpd_req_t *req)
 {
-    if (require_api_auth(req) != ESP_OK) {
+    if (require_config_auth(req) != ESP_OK) {
         return ESP_OK;
     }
 
@@ -450,7 +576,11 @@ static esp_err_t config_get_handler(httpd_req_t *req)
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load config failed");
     }
 
-    char response[768];
+    char provisioning_ssid[33] = {0};
+    if (wifi_manager_is_provisioning()) {
+        wifi_manager_get_provisioning_ssid(provisioning_ssid, sizeof(provisioning_ssid));
+    }
+    char response[896];
     int len = snprintf(response,
                        sizeof(response),
                        "{\"wifi_ssid\":\"%s\",\"mqtt_host\":\"%s\",\"mqtt_port\":%u,"
@@ -458,7 +588,8 @@ static esp_err_t config_get_handler(httpd_req_t *req)
                        "\"device_id\":\"%s\",\"sample_period_ms\":%lu,"
                        "\"modbus_enabled\":%s,\"modbus_slave_addr\":%u,"
                        "\"modbus_baud_rate\":%lu,\"modbus_start_register\":%u,"
-                       "\"modbus_register_count\":%u,\"modbus_poll_period_ms\":%lu}",
+                       "\"modbus_register_count\":%u,\"modbus_poll_period_ms\":%lu,"
+                       "\"provisioning\":%s,\"provisioning_ssid\":\"%s\"}",
                        config.wifi_ssid,
                        config.mqtt_host,
                        (unsigned int)config.mqtt_port,
@@ -471,7 +602,9 @@ static esp_err_t config_get_handler(httpd_req_t *req)
                        (unsigned long)config.modbus_baud_rate,
                        (unsigned int)config.modbus_start_register,
                        (unsigned int)config.modbus_register_count,
-                       (unsigned long)config.modbus_poll_period_ms);
+                       (unsigned long)config.modbus_poll_period_ms,
+                       wifi_manager_is_provisioning() ? "true" : "false",
+                       provisioning_ssid);
     if (len < 0 || len >= (int)sizeof(response)) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "config response overflow");
     }
@@ -482,7 +615,7 @@ static esp_err_t config_get_handler(httpd_req_t *req)
 
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
-    if (require_api_auth(req) != ESP_OK) {
+    if (require_config_auth(req) != ESP_OK) {
         return ESP_OK;
     }
 
@@ -517,6 +650,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
                  json_copy_optional_u32(root, "modbus_baud_rate", &config.modbus_baud_rate) &&
                  json_copy_optional_u32(root, "modbus_poll_period_ms", &config.modbus_poll_period_ms) &&
                  storage_validate_config(&config) == ESP_OK &&
+                 wifi_credentials_are_configured(&config) &&
                  api_token_is_secure(config.api_token);
     uint16_t slave_addr = config.modbus_slave_addr;
     if (valid) {
@@ -533,8 +667,21 @@ static esp_err_t config_post_handler(httpd_req_t *req)
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save config failed");
     }
 
+    bool provisioning = wifi_manager_is_provisioning();
+    if (provisioning) {
+        err = wifi_manager_apply_saved_config();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "saved config but station switch was not scheduled: %s",
+                     esp_err_to_name(err));
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                       "network switch failed");
+        }
+    }
+
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"ok\":true,\"restart_required\":true}");
+    return httpd_resp_sendstr(req, provisioning
+                                  ? "{\"ok\":true,\"network_switching\":true}"
+                                  : "{\"ok\":true,\"restart_required\":true}");
 }
 
 static esp_err_t reboot_handler(httpd_req_t *req)
@@ -646,7 +793,6 @@ static esp_err_t ota_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true,\"ota_started\":true}");
 }
-
 esp_err_t web_server_start(void)
 {
     if (s_server != NULL) {

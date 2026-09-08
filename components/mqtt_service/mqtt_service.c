@@ -48,37 +48,67 @@ static const char *MQTT_TOPIC_ERROR_SUFFIX = "error";
  * s_state_mutex 保护客户端句柄、连接状态、重连计数和唯一遥测 inflight。
  * MQTT 回调、ESP Timer 回调、业务任务与补传任务都会访问这些字段。
  */
+/** @brief 当前 MQTT 客户端句柄。*/
 static esp_mqtt_client_handle_t s_client;
+/** @brief 保护本模块共享状态的互斥锁。*/
 static SemaphoreHandle_t s_state_mutex;
+/** @brief 后台补传任务句柄。*/
 static TaskHandle_t s_replay_task;
+/** @brief MQTT 重连定时器句柄。*/
 static esp_timer_handle_t s_reconnect_timer;
+/** @brief 当前是否已连接到 broker。*/
 static bool s_connected;
+/** @brief 是否正在停止服务。*/
 static bool s_stopping;
+/** @brief 是否因为配置不安全而拒绝启动。*/
 static bool s_config_rejected;
+/** @brief 当前重连尝试次数。*/
 static uint32_t s_reconnect_attempt;
+/** @brief 当前正在等待 PUBACK 的消息 ID。*/
 static int s_inflight_msg_id = -1;
+/** @brief 当前 inflight 消息对应的遥测序号。*/
 static uint32_t s_inflight_sequence;
+/** @brief 当前 inflight 消息是否来自 Flash 队列。*/
 static bool s_inflight_from_flash;
+/** @brief RAM 中的待发遥测环形队列。*/
 static offline_store_record_t s_ram_queue[MQTT_RAM_QUEUE_CAPACITY];
+/** @brief RAM 队列头部下标。*/
 static uint32_t s_ram_queue_head;
+/** @brief RAM 队列当前记录数。*/
 static uint32_t s_ram_queue_count;
+/** @brief 本次启动随机生成的 boot_id。*/
 static uint32_t s_boot_id;
+/** @brief 递增的遥测序号。*/
 static uint32_t s_sequence;
+/** @brief 最近执行过的命令 ID 环形表。*/
 static char s_recent_cmd_ids[MQTT_RECENT_COMMAND_COUNT][64];
+/** @brief 最近命令表写入位置。*/
 static uint32_t s_recent_cmd_next;
 
+/** @brief 当前 broker URI。*/
 static char s_broker_uri[96];
+/** @brief 当前设备 ID。*/
 static char s_device_id[32];
+/** @brief MQTT 遗嘱在线状态的离线载荷。*/
 static char s_lwt_payload[128];
+/** @brief 状态主题。*/
 static char s_topic_status[96];
+/** @brief 传感器主题。*/
 static char s_topic_sensor[96];
+/** @brief 心跳主题。*/
 static char s_topic_heartbeat[96];
+/** @brief 控制命令主题。*/
 static char s_topic_cmd[96];
+/** @brief 控制命令确认主题。*/
 static char s_topic_cmd_ack[96];
+/** @brief 错误上报主题。*/
 static char s_topic_error[96];
+/** @brief 控制命令校验令牌。*/
 static char s_command_token[64];
 
-/** @brief 获取 MQTT 运行状态互斥锁。 */
+/**
+ * @brief 进入 MQTT 模块共享状态临界区。
+ */
 static void state_lock(void)
 {
     if (s_state_mutex != NULL) {
@@ -86,6 +116,9 @@ static void state_lock(void)
     }
 }
 
+/**
+ * @brief 退出 MQTT 模块共享状态临界区。
+ */
 static void state_unlock(void)
 {
     if (s_state_mutex != NULL) {
@@ -93,6 +126,12 @@ static void state_unlock(void)
     }
 }
 
+/**
+ * @brief 以尽量固定的比较路径判断两个字符串是否相等，用于令牌校验。
+ * @param left 左侧字符串。
+ * @param right 右侧字符串。
+ * @return bool 两个字符串完全相等时返回 true。
+ */
 static bool constant_time_equal(const char *left, const char *right)
 {
     if (left == NULL || right == NULL) {
@@ -110,12 +149,22 @@ static bool constant_time_equal(const char *left, const char *right)
     return difference == 0U;
 }
 
+/**
+ * @brief 判断 API token 是否满足最小长度且不是默认占位值。
+ * @param token 待检查的 API token。
+ * @return bool 满足安全要求时返回 true。
+ */
 static bool api_token_is_secure(const char *token)
 {
     return token != NULL && strlen(token) >= MQTT_MIN_API_TOKEN_LENGTH &&
            strcmp(token, "CHANGE_ME_BEFORE_DEPLOYMENT") != 0;
 }
 
+/**
+ * @brief 判断 broker 是否属于公开演示地址。
+ * @param host MQTT broker 主机名。
+ * @return bool 命中公开演示地址时返回 true。
+ */
 static bool mqtt_host_is_public_demo(const char *host)
 {
     return host != NULL &&
@@ -124,6 +173,11 @@ static bool mqtt_host_is_public_demo(const char *host)
             strcmp(host, "broker.hivemq.com") == 0);
 }
 
+/**
+ * @brief 检查从NVS加载的MQTT配置是否满足当前工程要求的安全约束。
+ * @param config 已加载的应用配置。
+ * @return esp_err_t 配置合法返回 ESP_OK，否则返回错误码。
+ */
 static esp_err_t validate_secure_mqtt_config(const app_config_t *config)
 {
     if (config == NULL) {
@@ -154,12 +208,21 @@ static esp_err_t validate_secure_mqtt_config(const app_config_t *config)
 #endif
 }
 
+/**
+ * @brief 按环形队列规则计算 RAM 待发队列的物理下标。
+ * @param offset 相对队首的偏移量。
+ * @return uint32_t 对应的环形队列下标。
+ */
 static uint32_t ram_queue_index(uint32_t offset)
 {
     return (s_ram_queue_head + offset) % MQTT_RAM_QUEUE_CAPACITY;
 }
 
-/** @brief 断线或主动停止时按原顺序把 RAM 遥测落入 Flash。调用者持有状态锁。 */
+/**
+ * @brief 将 RAM 中尚未持久化的遥测记录按原顺序刷入 Flash 队列。
+ *
+ * 调用者需持有状态锁。
+ */
 static void persist_ram_queue_locked(void)
 {
     for (uint32_t i = 0; i < s_ram_queue_count; ++i) {
@@ -177,6 +240,14 @@ static void persist_ram_queue_locked(void)
     s_ram_queue_count = 0U;
 }
 
+/**
+ * @brief 拼接单个 MQTT topic 字符串，失败时返回长度错误。
+ * @param buffer 输出缓冲区。
+ * @param buffer_size 输出缓冲区大小。
+ * @param device_id 设备 ID。
+ * @param suffix topic 后缀。
+ * @return esp_err_t 成功返回 ESP_OK，失败返回参数或长度错误。
+ */
 static esp_err_t mqtt_build_topic(char *buffer,
                                   size_t buffer_size,
                                   const char *device_id,
@@ -190,6 +261,11 @@ static esp_err_t mqtt_build_topic(char *buffer,
     return len >= 0 && len < (int)buffer_size ? ESP_OK : ESP_ERR_INVALID_SIZE;
 }
 
+/**
+ * @brief 根据设备 ID 生成本模块使用的全部 topic 和遗嘱载荷。
+ * @param device_id 设备 ID。
+ * @return esp_err_t 成功返回 ESP_OK，否则返回错误码。
+ */
 static esp_err_t mqtt_prepare_topics(const char *device_id)
 {
     if (device_id == NULL || device_id[0] == '\0') {
@@ -233,6 +309,14 @@ static esp_err_t mqtt_prepare_topics(const char *device_id)
     return lwt_len >= 0 && lwt_len < (int)sizeof(s_lwt_payload) ? ESP_OK : ESP_ERR_INVALID_SIZE;
 }
 
+/**
+ * @brief 从 JSON 对象中读取布尔值，兼容 true/false 和 0/1 两种写法。
+ * @param root JSON 根对象。
+ * @param key 字段名。
+ * @param present 是否找到该字段。
+ * @param value 输出的布尔值。
+ * @return bool 解析成功返回 true。
+ */
 static bool json_get_bool(const cJSON *root, const char *key, bool *present, bool *value)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
@@ -251,7 +335,11 @@ static bool json_get_bool(const cJSON *root, const char *key, bool *present, boo
     return false;
 }
 
-/** @brief 判断命令 ID 是否存在于最近执行环形表中。 */
+/**
+ * @brief 检查命令 ID 是否已经执行过，用于抑制 QoS1 重复投递。
+ * @param cmd_id 命令 ID。
+ * @return bool 已执行过返回 true。
+ */
 static bool command_was_executed(const char *cmd_id)
 {
     bool found = false;
@@ -266,7 +354,10 @@ static bool command_was_executed(const char *cmd_id)
     return found;
 }
 
-/** @brief 记住最近执行的命令 ID，抵御 QoS 1 重复投递。 */
+/**
+ * @brief 记录最近执行过的命令 ID。
+ * @param cmd_id 命令 ID。
+ */
 static void remember_executed_command(const char *cmd_id)
 {
     state_lock();
@@ -278,6 +369,15 @@ static void remember_executed_command(const char *cmd_id)
     state_unlock();
 }
 
+/**
+ * @brief 在连接可用时直接发布原始 MQTT 消息。
+ * @param topic 主题。
+ * @param payload 载荷。
+ * @param len 载荷长度。
+ * @param qos QoS 等级。
+ * @param retain 是否保留。
+ * @return int 发布成功返回 msg_id，失败返回 -1。
+ */
 static int mqtt_publish_raw(const char *topic, const char *payload, int len, int qos, int retain)
 {
     if (topic == NULL || payload == NULL || len <= 0) {
@@ -293,6 +393,12 @@ static int mqtt_publish_raw(const char *topic, const char *payload, int len, int
     return msg_id;
 }
 
+/**
+ * @brief 发布控制命令执行结果确认包。
+ * @param cmd_id 命令 ID。
+ * @param result 执行结果字符串。
+ * @param code 对应错误码或状态码。
+ */
 static void publish_command_ack(const char *cmd_id, const char *result, int code)
 {
     device_status_t status;
@@ -319,6 +425,11 @@ static void publish_command_ack(const char *cmd_id, const char *result, int code
     }
 }
 
+/**
+ * @brief 解析并执行来自 MQTT 控制主题的命令载荷。
+ * @param body MQTT 消息正文。
+ * @param len 消息长度。
+ */
 static void handle_control_payload(const char *body, int len)
 {
     char cmd_id[64] = {0};
@@ -411,6 +522,9 @@ static void handle_control_payload(const char *body, int len)
  *
  * 退避上限为 30 秒，连接成功后在事件回调中归零，避免 Broker 故障时高频重试。
  */
+/**
+ * @brief 按指数退避并叠加抖动，安排下一次 MQTT 重连。
+ */
 static void schedule_mqtt_reconnect(void)
 {
     if (s_reconnect_timer == NULL || s_stopping) {
@@ -438,6 +552,10 @@ static void schedule_mqtt_reconnect(void)
     }
 }
 
+/**
+ * @brief ESP 定时器回调：到点后发起 MQTT 重连请求。
+ * @param arg 定时器上下文参数。
+ */
 static void mqtt_reconnect_timer_callback(void *arg)
 {
     (void)arg;
@@ -455,6 +573,9 @@ static void mqtt_reconnect_timer_callback(void *arg)
     }
 }
 
+/**
+ * @brief 发布在线状态遗嘱对应的在线确认消息。
+ */
 static void publish_online_state(void)
 {
     char payload[192];
@@ -474,6 +595,13 @@ static void publish_online_state(void)
  *
  * 只有与当前离线队首对应的 msg_id 收到 MQTT_EVENT_PUBLISHED 后才执行出队，
  * 从而将 Flash 数据生命周期与 Broker 确认绑定。
+ */
+/**
+ * @brief 统一处理 MQTT 连接事件、下行命令和发布确认。
+ * @param handler_args 事件处理器参数。
+ * @param base 事件基。
+ * @param event_id 事件 ID。
+ * @param event_data 事件数据。
  */
 static void mqtt_event_handler(void *handler_args,
                                esp_event_base_t base,
@@ -564,6 +692,13 @@ static void mqtt_event_handler(void *handler_args,
     }
 }
 
+/**
+ * @brief 将离线/重放遥测记录编码为 JSON 文本。
+ * @param record 待编码记录。
+ * @param payload 输出缓冲区。
+ * @param payload_size 输出缓冲区大小。
+ * @return int 编码后的长度，失败返回 -1。
+ */
 static int encode_telemetry_payload(const offline_store_record_t *record,
                                     char *payload,
                                     size_t payload_size)
@@ -598,7 +733,11 @@ static int encode_telemetry_payload(const offline_store_record_t *record,
     return len >= 0 && len < (int)payload_size ? len : -1;
 }
 
-/** @brief 将 Flash 队首编码为版本化 JSON 并限制为单条 QoS 1 inflight。 */
+/**
+ * @brief 从 Flash 队列重放一条遥测记录。
+ * @param record 待发布记录。
+ * @return esp_err_t 成功返回 ESP_OK，否则返回错误码。
+ */
 static esp_err_t publish_queued_record(const offline_store_record_t *record)
 {
     char payload[448];
@@ -623,7 +762,10 @@ static esp_err_t publish_queued_record(const offline_store_record_t *record)
     return msg_id >= 0 ? ESP_OK : ESP_FAIL;
 }
 
-/** @brief 在线无积压时直接从 RAM 发布，收到 PUBACK 后才释放队首。 */
+/**
+ * @brief 在在线且无积压时，直接发布 RAM 队首遥测记录。
+ * @return esp_err_t 成功返回 ESP_OK，否则返回错误码。
+ */
 static esp_err_t publish_ram_record(void)
 {
     char payload[448];
@@ -656,6 +798,10 @@ static esp_err_t publish_ram_record(void)
  *
  * 任务按固定短周期检查连接和 outbox 水位，始终从队首顺序发送；损坏记录会计数
  * 后丢弃，避免一条坏数据永久阻塞整个队列。
+ */
+/**
+ * @brief 后台补传任务，负责轮询 Flash/RAM 队列并按序重发遥测。
+ * @param arg 任务参数。
  */
 static void mqtt_replay_task(void *arg)
 {
@@ -690,6 +836,10 @@ static void mqtt_replay_task(void *arg)
     }
 }
 
+/**
+ * @brief 初始化 MQTT 客户端、主题、重连定时器和补传任务。
+ * @return esp_err_t 成功返回 ESP_OK，否则返回错误码。
+ */
 esp_err_t mqtt_service_start(void)
 {
     state_lock();
@@ -815,13 +965,18 @@ esp_err_t mqtt_service_start(void)
     return ESP_OK;
 }
 
+/**
+ * @brief 停止 MQTT 客户端并把 RAM 中未发记录落盘。
+ * @return esp_err_t 停止流程中的错误码。
+ */
 esp_err_t mqtt_service_stop(void)
 {
     state_lock();
     esp_mqtt_client_handle_t client = s_client;
     if (client == NULL) {
         state_unlock();
-        return ESP_OK;
+        esp_err_t flush_err = offline_store_flush();
+        return flush_err == ESP_ERR_INVALID_STATE ? ESP_OK : flush_err;
     }
     s_stopping = true;
     s_connected = false;
@@ -831,15 +986,22 @@ esp_err_t mqtt_service_stop(void)
     s_inflight_from_flash = false;
     state_unlock();
 
+    esp_err_t flush_err = offline_store_flush();
+
     if (s_reconnect_timer != NULL) {
         esp_timer_stop(s_reconnect_timer);
     }
     esp_err_t err = esp_mqtt_client_stop(client);
     esp_mqtt_client_destroy(client);
     device_status_update_network(false, false);
-    return err;
+    return err != ESP_OK ? err : flush_err;
 }
 
+/**
+ * @brief 采集一条传感器状态并按在线/离线策略排队。
+ * @param status 当前设备状态。
+ * @return esp_err_t 成功返回 ESP_OK，否则返回错误码。
+ */
 esp_err_t mqtt_service_queue_sensor(const device_status_t *status)
 {
     if (status == NULL) {
@@ -917,11 +1079,21 @@ esp_err_t mqtt_service_queue_sensor(const device_status_t *status)
     return err;
 }
 
+/**
+ * @brief 对外兼容接口：与队列传感器逻辑保持一致。
+ * @param status 当前设备状态。
+ * @return esp_err_t 成功返回 ESP_OK，否则返回错误码。
+ */
 esp_err_t mqtt_service_publish_sensor(const device_status_t *status)
 {
     return mqtt_service_queue_sensor(status);
 }
 
+/**
+ * @brief 发布设备完整状态快照到 status 主题。
+ * @param status 当前设备状态。
+ * @return esp_err_t 成功返回 ESP_OK，否则返回错误码。
+ */
 esp_err_t mqtt_service_publish_status(const device_status_t *status)
 {
     if (status == NULL) {
@@ -937,7 +1109,8 @@ esp_err_t mqtt_service_publish_status(const device_status_t *status)
                        "\"led\":%d,\"buzzer\":%d,\"relay\":%d,\"wifi\":%d,\"mqtt\":%d,"
                        "\"uptime\":%lu,\"error_code\":%lu,\"error_flags\":%lu,"
                        "\"firmware\":\"%s\",\"state\":\"%s\",\"offline_queue\":%lu,"
-                       "\"offline_dropped\":%lu,\"edge_anomaly_flags\":%lu}",
+                        "\"offline_dropped\":%lu,\"offline_faulted\":%d,"
+                        "\"offline_last_error\":%ld,\"edge_anomaly_flags\":%lu}",
                        s_device_id,
                        (unsigned long)s_boot_id,
                        status->temperature,
@@ -953,15 +1126,22 @@ esp_err_t mqtt_service_publish_status(const device_status_t *status)
                        (unsigned long)status->error_flags,
                        status->firmware_version,
                        app_state_to_string(status->state),
-                       (unsigned long)metrics.offline_queued,
-                       (unsigned long)metrics.offline_dropped,
-                       (unsigned long)metrics.edge_anomaly_flags);
+                        (unsigned long)metrics.offline_queued,
+                        (unsigned long)metrics.offline_dropped,
+                        metrics.offline_faulted ? 1 : 0,
+                        (long)metrics.offline_last_error,
+                        (unsigned long)metrics.edge_anomaly_flags);
     if (len < 0 || len >= (int)sizeof(payload)) {
         return ESP_ERR_INVALID_SIZE;
     }
     return mqtt_publish_raw(s_topic_status, payload, len, 1, 1) >= 0 ? ESP_OK : ESP_FAIL;
 }
 
+/**
+ * @brief 发布轻量心跳消息，携带在线性和队列水位信息。
+ * @param status 当前设备状态。
+ * @return esp_err_t 成功返回 ESP_OK，否则返回错误码。
+ */
 esp_err_t mqtt_service_publish_heartbeat(const device_status_t *status)
 {
     if (status == NULL) {
@@ -989,6 +1169,11 @@ esp_err_t mqtt_service_publish_heartbeat(const device_status_t *status)
     return mqtt_publish_raw(s_topic_heartbeat, payload, len, 1, 0) >= 0 ? ESP_OK : ESP_FAIL;
 }
 
+/**
+ * @brief 发布错误状态摘要。
+ * @param status 当前设备状态。
+ * @return esp_err_t 成功返回 ESP_OK，否则返回错误码。
+ */
 esp_err_t mqtt_service_publish_error(const device_status_t *status)
 {
     if (status == NULL) {
@@ -1010,6 +1195,10 @@ esp_err_t mqtt_service_publish_error(const device_status_t *status)
     return mqtt_publish_raw(s_topic_error, payload, len, 1, 0) >= 0 ? ESP_OK : ESP_FAIL;
 }
 
+/**
+ * @brief 汇总 MQTT 连接、离线队列和边缘计算指标快照。
+ * @param metrics 输出指标结构体。
+ */
 void mqtt_service_get_metrics(mqtt_service_metrics_t *metrics)
 {
     if (metrics == NULL) {
@@ -1022,6 +1211,10 @@ void mqtt_service_get_metrics(mqtt_service_metrics_t *metrics)
     metrics->offline_capacity = stats.capacity;
     metrics->offline_dropped = stats.dropped;
     metrics->offline_corrupted = stats.corrupted;
+    metrics->offline_meta_erase_count = stats.meta_erase_count;
+    metrics->offline_data_erase_count = stats.data_erase_count;
+    metrics->offline_faulted = stats.faulted;
+    metrics->offline_last_error = stats.last_error;
     edge_compute_result_t edge;
     edge_compute_get_snapshot(&edge);
     metrics->edge_temperature_ema = edge.temperature_ema;

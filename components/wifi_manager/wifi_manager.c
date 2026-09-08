@@ -1,9 +1,12 @@
 #include "wifi_manager.h"
 
+#include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <time.h>
 
 #include "esp_event.h"
+#include "esp_mac.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
@@ -23,6 +26,12 @@ static bool s_sntp_initialized;
 static esp_timer_handle_t s_reconnect_timer;
 static uint32_t s_reconnect_attempt;
 static TaskHandle_t s_network_gate_task;
+static esp_netif_t *s_sta_netif;
+static esp_netif_t *s_ap_netif;
+static volatile bool s_provisioning;
+
+#define PROVISIONING_SSID_PREFIX "ESP32-Gateway-"
+#define PROVISIONING_PASSWORD "esp32setup"
 
 #define WIFI_RECONNECT_BASE_MS 1000U        // 基础重连时间，1秒
 #define WIFI_RECONNECT_MAX_MS 30000U        // 最大重连时间，30秒
@@ -154,6 +163,109 @@ static bool wifi_config_is_placeholder(const app_config_t *config)
            strcmp(config->wifi_password, "YOUR_WIFI_PASSWORD") == 0;
 }
 
+static void build_provisioning_ssid(char *ssid, size_t ssid_size)
+{
+    uint8_t mac[6] = {0};
+    if (ssid == NULL || ssid_size == 0) {
+        return;
+    }
+    if (esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP) == ESP_OK) {
+        snprintf(ssid, ssid_size, "%s%02X%02X%02X", PROVISIONING_SSID_PREFIX,
+                 mac[3], mac[4], mac[5]);
+    } else {
+        snprintf(ssid, ssid_size, "%s000000", PROVISIONING_SSID_PREFIX);
+    }
+}
+
+static esp_err_t wifi_start_provisioning_ap(void)
+{
+    if (s_ap_netif == NULL) {
+        s_ap_netif = esp_netif_create_default_wifi_ap();
+        if (s_ap_netif == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    char ssid[33] = {0};
+    build_provisioning_ssid(ssid, sizeof(ssid));
+    wifi_config_t ap_config = {0};
+    strncpy((char *)ap_config.ap.ssid, ssid, sizeof(ap_config.ap.ssid) - 1);
+    strncpy((char *)ap_config.ap.password, PROVISIONING_PASSWORD,
+            sizeof(ap_config.ap.password) - 1);
+    ap_config.ap.ssid_len = (uint8_t)strlen(ssid);
+    ap_config.ap.channel = 1;
+    ap_config.ap.max_connection = 4;
+    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_AP);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_wifi_start();
+    if (err == ESP_OK) {
+        s_provisioning = true;
+        ESP_LOGW(TAG, "provisioning SoftAP started: SSID=%s password=%s address=http://192.168.4.1/",
+                 ssid, PROVISIONING_PASSWORD);
+    }
+    return err;
+}
+
+static esp_err_t wifi_start_station(const app_config_t *config)
+{
+    if (config == NULL || wifi_config_is_placeholder(config)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    wifi_config_t wifi_config = {0};
+    strncpy((char *)wifi_config.sta.ssid, config->wifi_ssid,
+            sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char *)wifi_config.sta.password, config->wifi_password,
+            sizeof(wifi_config.sta.password) - 1);
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    if (err != ESP_OK) {
+        return err;
+    }
+    s_provisioning = false;
+    return esp_wifi_start();
+}
+
+static void wifi_apply_config_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(300));
+    app_config_t config;
+    if (storage_load_config(&config) != ESP_OK || wifi_config_is_placeholder(&config)) {
+        ESP_LOGW(TAG, "saved Wi-Fi config is unavailable; keeping provisioning AP");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    s_wifi_connected = false;
+    s_reconnect_attempt = 0;
+    if (s_reconnect_timer != NULL) {
+        esp_timer_stop(s_reconnect_timer);
+    }
+    ESP_ERROR_CHECK_WITHOUT_ABORT(mqtt_service_stop());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_stop());
+    esp_err_t err = wifi_start_station(&config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to switch to station mode: %s", esp_err_to_name(err));
+        device_status_set_error(APP_ERR_WIFI_CONNECT_FAILED);
+    } else {
+        device_status_update_network(false, false);
+        ESP_LOGI(TAG, "station mode started with saved Wi-Fi configuration");
+    }
+    vTaskDelete(NULL);
+}
+
 /**
  * @brief 处理 ESP-IDF 的 Wi-Fi 和 IP 事件。
  *
@@ -209,7 +321,10 @@ esp_err_t wifi_manager_init(void)
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    s_sta_netif = esp_netif_create_default_wifi_sta();
+    if (s_sta_netif == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
 
     wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_wifi_init(&init_config);
@@ -265,23 +380,11 @@ esp_err_t wifi_manager_start(void)
     }
 
     if (wifi_config_is_placeholder(&config)) {
-        ESP_LOGW(TAG, "WiFi credentials are not configured yet, skip station start");
+        ESP_LOGW(TAG, "WiFi credentials are not configured; entering provisioning mode");
         device_status_set_error(APP_ERR_WIFI_CONNECT_FAILED);
-        return ESP_OK;
+        return wifi_start_provisioning_ap();
     }
-
-    wifi_config_t wifi_config = {0};
-    /* 将持久化凭据复制到 ESP-IDF 的 Station 配置结构体中。 */
-    strncpy((char *)wifi_config.sta.ssid,
-            config.wifi_ssid,
-            sizeof(wifi_config.sta.ssid) - 1);
-    strncpy((char *)wifi_config.sta.password,
-            config.wifi_password,
-            sizeof(wifi_config.sta.password) - 1);
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    return esp_wifi_start();
+    return wifi_start_station(&config);
 }
 
 /**
@@ -292,4 +395,29 @@ esp_err_t wifi_manager_start(void)
 bool wifi_manager_is_connected(void)
 {
     return s_wifi_connected;
+}
+
+bool wifi_manager_is_provisioning(void)
+{
+    return s_provisioning;
+}
+
+esp_err_t wifi_manager_get_provisioning_ssid(char *ssid, size_t ssid_size)
+{
+    if (ssid == NULL || ssid_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    build_provisioning_ssid(ssid, ssid_size);
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_apply_saved_config(void)
+{
+    if (!s_wifi_initialized || !s_provisioning) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xTaskCreate(wifi_apply_config_task, "wifi_apply", 4096, NULL, 5, NULL) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }

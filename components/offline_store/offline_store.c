@@ -9,18 +9,24 @@
 #include "freertos/semphr.h"
 
 /*
- * 分区前两个 4 KiB 扇区保存追加式元数据日志，剩余扇区保存定长记录。
- * 双元数据扇区轮换可避免每次入队/出队都擦除同一个扇区，并通过 CRC 在重启时
+ * 分区前 8 个 4 KiB 扇区保存追加式元数据日志，剩余扇区保存定长记录。
+ * 八个元数据扇区轮换可避免每次入队/出队都擦除同一个扇区，并通过 CRC 在重启时
  * 选择最新有效版本。
  */
 #define OFFLINE_PARTITION_LABEL "telemetry"
 #define OFFLINE_PARTITION_SUBTYPE 0x40
 #define OFFLINE_SECTOR_SIZE 4096U
-#define OFFLINE_META_SECTORS 2U
+#define OFFLINE_META_SECTORS 8U
 #define OFFLINE_META_MAGIC 0x4F464D54U
 #define OFFLINE_RECORD_MAGIC 0x4F465243U
-#define OFFLINE_META_VERSION 2U
+#define OFFLINE_META_VERSION 3U
 #define OFFLINE_DROPPED_PERSIST_INTERVAL 64U
+#ifndef OFFLINE_META_POP_COMMIT_INTERVAL
+#define OFFLINE_META_POP_COMMIT_INTERVAL 8U
+#endif
+#if OFFLINE_META_POP_COMMIT_INTERVAL < 1
+#error "OFFLINE_META_POP_COMMIT_INTERVAL must be at least 1"
+#endif
 
 typedef struct {
     uint32_t magic;
@@ -50,6 +56,12 @@ static uint32_t s_meta_slot;
 static uint32_t s_records_per_sector;
 static uint32_t s_slot_count;
 static uint32_t s_capacity;
+static uint32_t s_meta_erase_count;
+static uint32_t s_data_erase_count;
+static uint32_t s_pending_pop_count;
+static bool s_legacy_layout_detected;
+static bool s_faulted;
+static esp_err_t s_last_error;
 static bool s_ready;
 
 /** @brief 使用标准 CRC32 多项式计算元数据和记录校验值。 */
@@ -96,6 +108,21 @@ static bool meta_is_valid(const offline_meta_entry_t *entry)
            entry->crc32 == meta_crc(entry);
 }
 
+static bool generation_is_newer(uint32_t candidate, uint32_t current)
+{
+    /* 使用有符号差值，保证 generation 回绕后仍能比较新旧顺序。 */
+    return (int32_t)(candidate - current) > 0;
+}
+
+static esp_err_t set_fault(esp_err_t err)
+{
+    if (err != ESP_OK) {
+        s_faulted = true;
+        s_last_error = err;
+    }
+    return err;
+}
+
 static size_t meta_offset(uint32_t sector, uint32_t slot)
 {
     return (size_t)sector * OFFLINE_SECTOR_SIZE +
@@ -126,12 +153,16 @@ static esp_err_t load_latest_meta(void)
                                                &entry,
                                                sizeof(entry));
             if (err != ESP_OK) {
-                return err;
+                return set_fault(err);
             }
             if (buffer_is_erased((const uint8_t *)&entry, sizeof(entry))) {
                 break;
             }
-            if (meta_is_valid(&entry) && (!found || entry.generation > best.generation)) {
+            if (entry.magic == OFFLINE_META_MAGIC && entry.version != OFFLINE_META_VERSION) {
+                s_legacy_layout_detected = true;
+            }
+            if (meta_is_valid(&entry) &&
+                (!found || generation_is_newer(entry.generation, best.generation))) {
                 best = entry;
                 best_sector = sector;
                 best_slot = slot;
@@ -168,8 +199,9 @@ static esp_err_t persist_meta_locked(void)
                                                         (size_t)target_sector * OFFLINE_SECTOR_SIZE,
                                                         OFFLINE_SECTOR_SIZE);
         if (erase_err != ESP_OK) {
-            return erase_err;
+            return set_fault(erase_err);
         }
+        s_meta_erase_count++;
     }
 
     s_meta.generation++;
@@ -181,6 +213,9 @@ static esp_err_t persist_meta_locked(void)
     if (err == ESP_OK) {
         s_meta_sector = target_sector;
         s_meta_slot = target_slot;
+        s_pending_pop_count = 0U;
+    } else {
+        set_fault(err);
     }
     return err;
 }
@@ -218,14 +253,21 @@ esp_err_t offline_store_init(void)
 
     esp_err_t err = load_latest_meta();
     if (err == ESP_ERR_NOT_FOUND) {
+        if (s_legacy_layout_detected) {
+            ESP_LOGW(TAG, "legacy telemetry metadata detected; resetting queue for layout v%u",
+                     (unsigned int)OFFLINE_META_VERSION);
+        }
         err = esp_partition_erase_range(s_partition,
                                         0,
                                         OFFLINE_META_SECTORS * OFFLINE_SECTOR_SIZE);
         if (err == ESP_OK) {
+            s_meta_erase_count += OFFLINE_META_SECTORS;
             s_meta.crc32 = meta_crc(&s_meta);
             err = esp_partition_write(s_partition, 0, &s_meta, sizeof(s_meta));
             s_meta_sector = 0;
             s_meta_slot = 0;
+        } else {
+            set_fault(err);
         }
     }
     if (err != ESP_OK) {
@@ -249,8 +291,12 @@ esp_err_t offline_store_append(const offline_store_record_t *record)
     if (!s_ready || record == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_faulted) {
+        esp_err_t fault = s_last_error;
+        xSemaphoreGive(s_mutex);
+        return fault;
+    }
     if (s_meta.count >= s_capacity) {
         s_meta.dropped++;
         esp_err_t meta_err = (s_meta.dropped % OFFLINE_DROPPED_PERSIST_INTERVAL) == 0U
@@ -283,8 +329,9 @@ esp_err_t offline_store_append(const offline_store_record_t *record)
                                                         OFFLINE_SECTOR_SIZE);
         if (erase_err != ESP_OK) {
             xSemaphoreGive(s_mutex);
-            return erase_err;
+            return set_fault(erase_err);
         }
+        s_data_erase_count++;
     }
 
     offline_flash_record_t flash_record = {
@@ -300,6 +347,8 @@ esp_err_t offline_store_append(const offline_store_record_t *record)
         s_meta.head = (s_meta.head + 1U) % s_slot_count;
         s_meta.count++;
         err = persist_meta_locked();
+    } else {
+        set_fault(err);
     }
     xSemaphoreGive(s_mutex);
     return err;
@@ -310,8 +359,12 @@ esp_err_t offline_store_peek(offline_store_record_t *record)
     if (!s_ready || record == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_faulted) {
+        esp_err_t fault = s_last_error;
+        xSemaphoreGive(s_mutex);
+        return fault;
+    }
     if (s_meta.count == 0U) {
         xSemaphoreGive(s_mutex);
         return ESP_ERR_NOT_FOUND;
@@ -322,11 +375,19 @@ esp_err_t offline_store_peek(offline_store_record_t *record)
                                        data_offset(s_meta.tail),
                                        &flash_record,
                                        sizeof(flash_record));
+    if (err != ESP_OK) {
+        set_fault(err);
+    }
     if (err == ESP_OK &&
         (flash_record.magic != OFFLINE_RECORD_MAGIC || flash_record.crc32 != record_crc(&flash_record))) {
         s_meta.corrupted++;
-        persist_meta_locked();
-        err = ESP_ERR_INVALID_CRC;
+        if (persist_meta_locked() != ESP_OK) {
+            err = s_last_error;
+        }
+        if (err == ESP_OK) {
+            err = ESP_ERR_INVALID_CRC;
+            set_fault(err);
+        }
     }
     if (err == ESP_OK) {
         *record = flash_record.record;
@@ -340,15 +401,39 @@ esp_err_t offline_store_pop(void)
     if (!s_ready) {
         return ESP_ERR_INVALID_STATE;
     }
-
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_faulted) {
+        esp_err_t fault = s_last_error;
+        xSemaphoreGive(s_mutex);
+        return fault;
+    }
     if (s_meta.count == 0U) {
         xSemaphoreGive(s_mutex);
         return ESP_ERR_NOT_FOUND;
     }
     s_meta.tail = (s_meta.tail + 1U) % s_slot_count;
     s_meta.count--;
-    esp_err_t err = persist_meta_locked();
+    s_pending_pop_count++;
+    esp_err_t err = ESP_OK;
+    if (s_pending_pop_count >= OFFLINE_META_POP_COMMIT_INTERVAL) {
+        err = persist_meta_locked();
+    }
+    xSemaphoreGive(s_mutex);
+    return err;
+}
+
+esp_err_t offline_store_flush(void)
+{
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_faulted) {
+        esp_err_t err = s_last_error;
+        xSemaphoreGive(s_mutex);
+        return err;
+    }
+    esp_err_t err = s_pending_pop_count > 0U ? persist_meta_locked() : ESP_OK;
     xSemaphoreGive(s_mutex);
     return err;
 }
@@ -367,5 +452,9 @@ void offline_store_get_stats(offline_store_stats_t *stats)
     stats->capacity = s_capacity;
     stats->dropped = s_meta.dropped;
     stats->corrupted = s_meta.corrupted;
+    stats->meta_erase_count = s_meta_erase_count;
+    stats->data_erase_count = s_data_erase_count;
+    stats->faulted = s_faulted;
+    stats->last_error = s_last_error;
     xSemaphoreGive(s_mutex);
 }

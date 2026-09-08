@@ -14,6 +14,7 @@ idf_component_register(
         mqtt_service
         ota_service
         storage_nvs
+        wifi_manager
         esp_http_server
         esp_system
         json

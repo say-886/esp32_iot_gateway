@@ -34,6 +34,10 @@ typedef struct {
     uint32_t capacity;  /**< 分区理论记录容量。 */
     uint32_t dropped;   /**< 队列满或扇区暂不可复用时丢弃的新记录数。 */
     uint32_t corrupted; /**< CRC 校验失败记录数。 */
+    uint32_t meta_erase_count; /**< 本次启动以来元数据扇区擦除次数（RAM 统计）。 */
+    uint32_t data_erase_count; /**< 本次启动以来数据扇区擦除次数（RAM 统计）。 */
+    bool faulted;              /**< Flash 操作发生不可恢复错误。 */
+    esp_err_t last_error;      /**< 最近一次 Flash 操作错误码。 */
 } offline_store_stats_t;
 
 /**
@@ -62,9 +66,19 @@ esp_err_t offline_store_peek(offline_store_record_t *record);
 /**
  * @brief 在云端 QoS 1 确认后删除队首记录。
  *
+ * 队首移动默认每 8 次批量持久化；掉电前可调用 offline_store_flush()，
+ * 否则最多会重复发送尚未提交删除的记录。
+ *
  * @return ESP_OK 成功；ESP_ERR_NOT_FOUND 队列为空。
  */
 esp_err_t offline_store_pop(void);
+
+/**
+ * @brief 立即持久化尚未提交的队首移动操作。
+ *
+ * @return ESP_OK 成功；其他值表示 Flash 写入失败。
+ */
+esp_err_t offline_store_flush(void);
 
 /**
  * @brief 获取离线队列统计快照。

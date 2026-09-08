@@ -163,6 +163,26 @@ static void sanitize_config(app_config_t *config)
     }
 }
 
+static bool config_equal(const app_config_t *left, const app_config_t *right)
+{
+    return memcmp(left->wifi_ssid, right->wifi_ssid, sizeof(left->wifi_ssid)) == 0 &&
+           memcmp(left->wifi_password, right->wifi_password, sizeof(left->wifi_password)) == 0 &&
+           memcmp(left->mqtt_host, right->mqtt_host, sizeof(left->mqtt_host)) == 0 &&
+           left->mqtt_port == right->mqtt_port &&
+           left->mqtt_use_tls == right->mqtt_use_tls &&
+           memcmp(left->mqtt_username, right->mqtt_username, sizeof(left->mqtt_username)) == 0 &&
+           memcmp(left->mqtt_password, right->mqtt_password, sizeof(left->mqtt_password)) == 0 &&
+           memcmp(left->device_id, right->device_id, sizeof(left->device_id)) == 0 &&
+           memcmp(left->api_token, right->api_token, sizeof(left->api_token)) == 0 &&
+           left->sample_period_ms == right->sample_period_ms &&
+           left->modbus_enabled == right->modbus_enabled &&
+           left->modbus_slave_addr == right->modbus_slave_addr &&
+           left->modbus_baud_rate == right->modbus_baud_rate &&
+           left->modbus_start_register == right->modbus_start_register &&
+           left->modbus_register_count == right->modbus_register_count &&
+           left->modbus_poll_period_ms == right->modbus_poll_period_ms;
+}
+
 esp_err_t storage_validate_config(const app_config_t *config)
 {
     if (config == NULL) {
@@ -304,6 +324,17 @@ esp_err_t storage_save_config(const app_config_t *config)
     esp_err_t err = storage_validate_config(&sanitized);
     if (err != ESP_OK) {
         return err;
+    }
+
+    /* 有效配置未变化时跳过写入，避免消耗 NVS 条目和页擦除次数。 */
+    bool unchanged = false;
+    config_lock();
+    if (s_cache_ready) {
+        unchanged = config_equal(&s_cached_config, &sanitized);
+    }
+    config_unlock();
+    if (unchanged) {
+        return ESP_OK;
     }
 
     storage_config_record_t record = {

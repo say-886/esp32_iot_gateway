@@ -33,6 +33,39 @@ idf.py -p COMx flash monitor
 - 默认 Token 下，HTTP 修改接口保持禁用；HTTP 管理面仅用于可信局域网；
 - OTA 仅接受 HTTPS，并在 60 秒任务健康窗口后确认新镜像。
 
+首次配网：
+
+- 当 NVS 中没有有效 Wi-Fi SSID/密码时，设备不会启动 Station，而是创建
+  `ESP32-Gateway-XXXXXX` SoftAP，密码为 `esp32setup`，配置地址为
+  `http://192.168.4.1/`。
+- 连接该热点后调用 `GET /api/config` 查看当前配置，再向 `POST /api/config`
+  写入有效的 Wi-Fi、MQTT、设备 ID 和至少 16 位随机 API Token。配网态的配置接口
+  仅在本地 SoftAP 放行，保存成功后设备会自动停止 SoftAP、切回 Station 并联网。
+- 例如：
+
+```powershell
+$body = @{
+  wifi_ssid = "your-wifi"
+  wifi_password = "your-password"
+  mqtt_host = "mqtt.example.com"
+  mqtt_port = 8883
+  mqtt_use_tls = $true
+  mqtt_username = "mqtt-user"
+  mqtt_password = "mqtt-password"
+  device_id = "esp32_gateway_001"
+  api_token = "replace-with-a-random-token-at-least-16-chars"
+  sample_period_ms = 2000
+  modbus_enabled = $false
+  modbus_slave_addr = 1
+  modbus_baud_rate = 9600
+  modbus_start_register = 0
+  modbus_register_count = 4
+  modbus_poll_period_ms = 5000
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://192.168.4.1/api/config `
+  -ContentType 'application/json' -Body $body
+```
+
 ## 验证边界
 
 当前固件已在 ESP-IDF 5.3.2 下完整构建。弱网、补传中掉电、72 小时运行和

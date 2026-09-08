@@ -11,6 +11,10 @@ typedef struct {
     uint32_t offline_capacity;      /**< Flash 队列理论容量。 */
     uint32_t offline_dropped;       /**< 已丢弃的新样本数。 */
     uint32_t offline_corrupted;     /**< CRC 损坏记录数。 */
+    uint32_t offline_meta_erase_count; /**< 元数据扇区擦除次数（本次启动）。 */
+    uint32_t offline_data_erase_count; /**< 数据扇区擦除次数（本次启动）。 */
+    bool offline_faulted;            /**< 离线队列是否发生不可恢复错误。 */
+    int32_t offline_last_error;      /**< 离线队列最近一次错误码。 */
     uint32_t outbox_bytes;          /**< ESP-MQTT 内存 outbox 占用。 */
     float edge_temperature_ema;     /**< 本地平滑温度。 */
     float edge_humidity_ema;        /**< 本地平滑湿度。 */
