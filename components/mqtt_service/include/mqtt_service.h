@@ -21,6 +21,12 @@ typedef struct {
     float edge_light_ema;           /**< 本地平滑光照。 */
     uint32_t edge_anomaly_flags;    /**< 最近一次边缘异常位图。 */
     uint32_t edge_sample_count;     /**< 已处理的边缘样本数。 */
+    uint32_t reliable_queued;       /**< 可靠 Flash 队列待确认记录数。 */
+    uint32_t reliable_capacity;     /**< 可靠 Flash 队列理论容量。 */
+    uint32_t reliable_dropped;      /**< 可靠队列拒绝接收的记录数。 */
+    uint32_t reliable_corrupted;    /**< 可靠 Flash 队列 CRC 损坏记录数。 */
+    bool reliable_faulted;          /**< 可靠 Flash 队列是否故障。 */
+    int32_t reliable_last_error;    /**< 可靠队列最近一次错误码。 */
 } mqtt_service_metrics_t;
 
 /** @brief 加载配置并启动 MQTT 客户端、重连定时器和补传任务。 */
@@ -33,6 +39,13 @@ esp_err_t mqtt_service_publish_status(const device_status_t *status);
 esp_err_t mqtt_service_publish_sensor(const device_status_t *status);
 /** @brief 执行边缘计算；在线无积压时从 RAM 直发，断网/积压时才写入 Flash。 */
 esp_err_t mqtt_service_queue_sensor(const device_status_t *status);
+/**
+ * @brief 可靠提交一条关键遥测。
+ *
+ * 返回 ESP_OK 时，事件已经完成 Flash 提交并将在 MQTT QoS 1 PUBACK 前保留。
+ * event_type 仅允许 ASCII 字母、数字、下划线、连字符和句点；payload_json 必须为 JSON 对象。
+ */
+esp_err_t mqtt_service_queue_reliable(const char *event_type, const char *payload_json);
 /** @brief 发布设备心跳和队列流量指标。 */
 esp_err_t mqtt_service_publish_heartbeat(const device_status_t *status);
 /** @brief 发布设备错误状态。 */

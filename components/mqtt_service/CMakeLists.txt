@@ -7,6 +7,7 @@ idf_component_register(
         app_common
         edge_compute
         offline_store
+        reliable_store
         storage_nvs
         mqtt
         mbedtls

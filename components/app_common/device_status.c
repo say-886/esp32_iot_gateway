@@ -70,6 +70,7 @@ static uint32_t error_flag(uint32_t error_code)
     case APP_ERR_OTA_FAILED: return 1U << 6;
     case APP_ERR_WATCHDOG: return 1U << 7;
     case APP_ERR_MODBUS_READ_FAILED: return 1U << 8;
+    case APP_ERR_STORAGE_FAILED: return 1U << 9;
     default: return 0;
     }
 }
@@ -87,6 +88,7 @@ static uint32_t primary_error(void)
         APP_ERR_WATCHDOG,
         APP_ERR_MODBUS_READ_FAILED,
         APP_ERR_OTA_FAILED,
+        APP_ERR_STORAGE_FAILED,
         APP_ERR_NVS_WRITE_FAILED,
         APP_ERR_NVS_READ_FAILED,
         APP_ERR_WIFI_CONNECT_FAILED,

@@ -23,6 +23,8 @@ const char *app_error_code_to_string(app_error_code_t code)
         return "NVS_READ_FAILED";
     case APP_ERR_NVS_WRITE_FAILED:
         return "NVS_WRITE_FAILED";
+    case APP_ERR_STORAGE_FAILED:
+        return "STORAGE_FAILED";
     case APP_ERR_OTA_FAILED:
         return "OTA_FAILED";
     case APP_ERR_WATCHDOG:

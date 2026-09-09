@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "mqtt_client.h"
 #include "offline_store.h"
+#include "reliable_store.h"
 #include "storage_nvs.h"
 
 #define MQTT_TOPIC_ROOT "esp32/gateway"
@@ -28,6 +29,7 @@
 #define MQTT_REPLAY_PERIOD_MS 500U
 #define MQTT_RECENT_COMMAND_COUNT 8U
 #define MQTT_RAM_QUEUE_CAPACITY 8U
+#define MQTT_RELIABLE_BURST_MAX 4U
 #define MQTT_CAPTURED_OFFLINE_FLAG (1U << 0)
 #define MQTT_VALID_UNIX_TIME 1700000000LL
 #define MQTT_MIN_API_TOKEN_LENGTH 16U
@@ -39,6 +41,7 @@
 static const char *TAG = "mqtt_service";
 static const char *MQTT_TOPIC_STATUS_SUFFIX = "status";
 static const char *MQTT_TOPIC_SENSOR_SUFFIX = "sensor";
+static const char *MQTT_TOPIC_RELIABLE_SUFFIX = "reliable_telemetry";
 static const char *MQTT_TOPIC_HEARTBEAT_SUFFIX = "heartbeat";
 static const char *MQTT_TOPIC_CMD_SUFFIX = "cmd";
 static const char *MQTT_TOPIC_CMD_ACK_SUFFIX = "cmd_ack";
@@ -69,7 +72,16 @@ static int s_inflight_msg_id = -1;
 /** @brief 当前 inflight 消息对应的遥测序号。*/
 static uint32_t s_inflight_sequence;
 /** @brief 当前 inflight 消息是否来自 Flash 队列。*/
-static bool s_inflight_from_flash;
+typedef enum {
+    MQTT_INFLIGHT_NONE = 0,
+    MQTT_INFLIGHT_RAM,
+    MQTT_INFLIGHT_OFFLINE,
+    MQTT_INFLIGHT_RELIABLE,
+} mqtt_inflight_source_t;
+/** @brief 当前等待 PUBACK 的记录所属队列。 */
+static mqtt_inflight_source_t s_inflight_source;
+/** @brief 连续确认的可靠记录数，用于保障普通遥测的最小发送机会。 */
+static uint32_t s_reliable_burst_count;
 /** @brief RAM 中的待发遥测环形队列。*/
 static offline_store_record_t s_ram_queue[MQTT_RAM_QUEUE_CAPACITY];
 /** @brief RAM 队列头部下标。*/
@@ -95,6 +107,8 @@ static char s_lwt_payload[128];
 static char s_topic_status[96];
 /** @brief 传感器主题。*/
 static char s_topic_sensor[96];
+/** @brief 可靠遥测主题。 */
+static char s_topic_reliable[96];
 /** @brief 心跳主题。*/
 static char s_topic_heartbeat[96];
 /** @brief 控制命令主题。*/
@@ -277,6 +291,10 @@ static esp_err_t mqtt_prepare_topics(const char *device_id)
     if (err == ESP_OK) {
         err = mqtt_build_topic(s_topic_sensor, sizeof(s_topic_sensor), device_id,
                                MQTT_TOPIC_SENSOR_SUFFIX);
+    }
+    if (err == ESP_OK) {
+        err = mqtt_build_topic(s_topic_reliable, sizeof(s_topic_reliable), device_id,
+                               MQTT_TOPIC_RELIABLE_SUFFIX);
     }
     if (err == ESP_OK) {
         err = mqtt_build_topic(s_topic_heartbeat, sizeof(s_topic_heartbeat), device_id,
@@ -630,7 +648,7 @@ static void mqtt_event_handler(void *handler_args,
         s_connected = false;
         persist_ram_queue_locked();
         s_inflight_msg_id = -1;
-        s_inflight_from_flash = false;
+        s_inflight_source = MQTT_INFLIGHT_NONE;
         bool stopping = s_stopping;
         state_unlock();
         device_status_update_network(true, false);
@@ -640,23 +658,28 @@ static void mqtt_event_handler(void *handler_args,
         break;
     case MQTT_EVENT_PUBLISHED: {
         bool telemetry_acked = false;
-        bool from_flash = false;
+        mqtt_inflight_source_t source = MQTT_INFLIGHT_NONE;
         uint32_t sequence = 0;
         state_lock();
         if (s_inflight_msg_id >= 0 && event->msg_id == s_inflight_msg_id) {
             telemetry_acked = true;
-            from_flash = s_inflight_from_flash;
+            source = s_inflight_source;
             sequence = s_inflight_sequence;
             s_inflight_msg_id = -2;
         }
         state_unlock();
         if (telemetry_acked) {
-            if (from_flash) {
+            if (source == MQTT_INFLIGHT_RELIABLE) {
+                esp_err_t pop_err = reliable_store_pop();
+                if (pop_err != ESP_OK) {
+                    ESP_LOGW(TAG, "reliable queue pop failed after ACK: %s", esp_err_to_name(pop_err));
+                }
+            } else if (source == MQTT_INFLIGHT_OFFLINE) {
                 esp_err_t pop_err = offline_store_pop();
                 if (pop_err != ESP_OK) {
                     ESP_LOGW(TAG, "offline queue pop failed after ACK: %s", esp_err_to_name(pop_err));
                 }
-            } else {
+            } else if (source == MQTT_INFLIGHT_RAM) {
                 state_lock();
                 if (s_ram_queue_count > 0U &&
                     s_ram_queue[s_ram_queue_head].sequence == sequence) {
@@ -670,10 +693,16 @@ static void mqtt_event_handler(void *handler_args,
             }
             ESP_LOGD(TAG, "telemetry ACKed: sequence=%lu source=%s",
                      (unsigned long)sequence,
-                     from_flash ? "flash" : "ram");
+                     source == MQTT_INFLIGHT_RELIABLE ? "reliable" :
+                     source == MQTT_INFLIGHT_OFFLINE ? "flash" : "ram");
             state_lock();
+            if (source == MQTT_INFLIGHT_RELIABLE) {
+                s_reliable_burst_count++;
+            } else {
+                s_reliable_burst_count = 0U;
+            }
             s_inflight_msg_id = -1;
-            s_inflight_from_flash = false;
+            s_inflight_source = MQTT_INFLIGHT_NONE;
             state_unlock();
         }
         break;
@@ -756,7 +785,7 @@ static esp_err_t publish_queued_record(const offline_store_record_t *record)
     if (msg_id >= 0) {
         s_inflight_msg_id = msg_id;
         s_inflight_sequence = record->sequence;
-        s_inflight_from_flash = true;
+        s_inflight_source = MQTT_INFLIGHT_OFFLINE;
     }
     state_unlock();
     return msg_id >= 0 ? ESP_OK : ESP_FAIL;
@@ -787,7 +816,67 @@ static esp_err_t publish_ram_record(void)
     if (msg_id >= 0) {
         s_inflight_msg_id = msg_id;
         s_inflight_sequence = record->sequence;
-        s_inflight_from_flash = false;
+        s_inflight_source = MQTT_INFLIGHT_RAM;
+    }
+    state_unlock();
+    return msg_id >= 0 ? ESP_OK : ESP_FAIL;
+}
+
+static bool reliable_event_type_valid(const char *event_type)
+{
+    if (event_type == NULL || event_type[0] == '\0') {
+        return false;
+    }
+    for (const unsigned char *p = (const unsigned char *)event_type; *p != '\0'; ++p) {
+        if (!(('a' <= *p && *p <= 'z') || ('A' <= *p && *p <= 'Z') ||
+              ('0' <= *p && *p <= '9') || *p == '_' || *p == '-' || *p == '.')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int encode_reliable_payload(const reliable_store_record_t *record,
+                                   char *payload, size_t payload_size)
+{
+    if (record == NULL || payload == NULL || payload_size == 0U) {
+        return -1;
+    }
+    int prefix_len = snprintf(payload, payload_size,
+                              "{\"schema\":1,\"device_id\":\"%s\","
+                              "\"boot_id\":%lu,\"seq\":%lu,\"timestamp\":%llu,"
+                              "\"event_type\":\"%s\",\"payload\":",
+                              s_device_id, (unsigned long)record->boot_id,
+                              (unsigned long)record->sequence,
+                              (unsigned long long)record->timestamp_ms,
+                              record->event_type);
+    if (prefix_len < 0 || prefix_len >= (int)payload_size) {
+        return -1;
+    }
+    int suffix_len = snprintf(payload + prefix_len, payload_size - (size_t)prefix_len,
+                              "%s}", record->payload);
+    int total = suffix_len >= 0 ? prefix_len + suffix_len : -1;
+    return total >= 0 && total < (int)payload_size ? total : -1;
+}
+
+static esp_err_t publish_reliable_record(const reliable_store_record_t *record)
+{
+    char payload[RELIABLE_STORE_PAYLOAD_MAX_LEN + 192U];
+    int len = encode_reliable_payload(record, payload, sizeof(payload));
+    if (len < 0) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    state_lock();
+    if (!s_connected || s_stopping || s_client == NULL || s_inflight_msg_id != -1 ||
+        esp_mqtt_client_get_outbox_size(s_client) >= MQTT_REPLAY_OUTBOX_HIGH_WATER) {
+        state_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    int msg_id = esp_mqtt_client_publish(s_client, s_topic_reliable, payload, len, 1, 0);
+    if (msg_id >= 0) {
+        s_inflight_msg_id = msg_id;
+        s_inflight_sequence = record->sequence;
+        s_inflight_source = MQTT_INFLIGHT_RELIABLE;
     }
     state_unlock();
     return msg_id >= 0 ? ESP_OK : ESP_FAIL;
@@ -811,14 +900,29 @@ static void mqtt_replay_task(void *arg)
         bool can_publish = s_connected && !s_stopping && s_client != NULL && s_inflight_msg_id == -1;
         bool ram_pending = s_ram_queue_count > 0U;
         state_unlock();
+        offline_store_stats_t offline_stats;
+        reliable_store_stats_t reliable_stats;
+        offline_store_get_stats(&offline_stats);
+        reliable_store_get_stats(&reliable_stats);
+        bool ordinary_pending = ram_pending || offline_stats.queued > 0U;
         if (can_publish) {
             esp_err_t err = ESP_OK;
-            if (ram_pending) {
+            bool choose_reliable = reliable_stats.queued > 0U &&
+                                   (!ordinary_pending || s_reliable_burst_count < MQTT_RELIABLE_BURST_MAX);
+            if (choose_reliable) {
+                reliable_store_record_t record;
+                err = reliable_store_peek(&record);
+                if (err == ESP_OK) {
+                    err = publish_reliable_record(&record);
+                } else if (err != ESP_ERR_NOT_FOUND) {
+                    ESP_LOGW(TAG, "reliable telemetry replay blocked: %s", esp_err_to_name(err));
+                }
+            } else if (ram_pending) {
                 err = publish_ram_record();
                 if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
                     ESP_LOGW(TAG, "RAM telemetry publish failed: %s", esp_err_to_name(err));
                 }
-            } else {
+            } else if (offline_stats.queued > 0U) {
                 offline_store_record_t record;
                 err = offline_store_peek(&record);
                 if (err == ESP_ERR_INVALID_CRC) {
@@ -940,7 +1044,7 @@ esp_err_t mqtt_service_start(void)
     s_connected = false;
     s_stopping = false;
     s_inflight_msg_id = -1;
-    s_inflight_from_flash = false;
+    s_inflight_source = MQTT_INFLIGHT_NONE;
     s_ram_queue_head = 0U;
     s_ram_queue_count = 0U;
     state_unlock();
@@ -955,9 +1059,10 @@ esp_err_t mqtt_service_start(void)
     }
 
     ESP_LOGI(TAG, "MQTT client started: %s", s_broker_uri);
-    ESP_LOGI(TAG, "MQTT topics: %s | %s | %s | %s | %s | %s",
+    ESP_LOGI(TAG, "MQTT topics: %s | %s | %s | %s | %s | %s | %s",
              s_topic_status,
              s_topic_sensor,
+             s_topic_reliable,
              s_topic_heartbeat,
              s_topic_cmd,
              s_topic_cmd_ack,
@@ -976,17 +1081,25 @@ esp_err_t mqtt_service_stop(void)
     if (client == NULL) {
         state_unlock();
         esp_err_t flush_err = offline_store_flush();
-        return flush_err == ESP_ERR_INVALID_STATE ? ESP_OK : flush_err;
+        esp_err_t reliable_flush_err = reliable_store_flush();
+        if (flush_err == ESP_ERR_INVALID_STATE) {
+            flush_err = ESP_OK;
+        }
+        if (reliable_flush_err == ESP_ERR_INVALID_STATE) {
+            reliable_flush_err = ESP_OK;
+        }
+        return flush_err != ESP_OK ? flush_err : reliable_flush_err;
     }
     s_stopping = true;
     s_connected = false;
     persist_ram_queue_locked();
     s_client = NULL;
     s_inflight_msg_id = -1;
-    s_inflight_from_flash = false;
+    s_inflight_source = MQTT_INFLIGHT_NONE;
     state_unlock();
 
     esp_err_t flush_err = offline_store_flush();
+    esp_err_t reliable_flush_err = reliable_store_flush();
 
     if (s_reconnect_timer != NULL) {
         esp_timer_stop(s_reconnect_timer);
@@ -994,7 +1107,10 @@ esp_err_t mqtt_service_stop(void)
     esp_err_t err = esp_mqtt_client_stop(client);
     esp_mqtt_client_destroy(client);
     device_status_update_network(false, false);
-    return err != ESP_OK ? err : flush_err;
+    if (err != ESP_OK) {
+        return err;
+    }
+    return flush_err != ESP_OK ? flush_err : reliable_flush_err;
 }
 
 /**
@@ -1060,7 +1176,7 @@ esp_err_t mqtt_service_queue_sensor(const device_status_t *status)
         ESP_LOGW(TAG, "RAM telemetry queue saturated; spilling ordered batch to Flash");
         persist_ram_queue_locked();
         if (s_inflight_msg_id >= 0) {
-            s_inflight_from_flash = true;
+            s_inflight_source = MQTT_INFLIGHT_OFFLINE;
         }
         record.flags |= MQTT_CAPTURED_OFFLINE_FLAG;
         esp_err_t spill_err = offline_store_append(&record);
@@ -1077,6 +1193,36 @@ esp_err_t mqtt_service_queue_sensor(const device_status_t *status)
         ESP_LOGW(TAG, "offline telemetry queue full; newest sample dropped");
     }
     return err;
+}
+
+esp_err_t mqtt_service_queue_reliable(const char *event_type, const char *payload_json)
+{
+    if (!reliable_event_type_valid(event_type) || payload_json == NULL ||
+        strlen(event_type) >= RELIABLE_STORE_TYPE_MAX_LEN ||
+        strlen(payload_json) == 0U || strlen(payload_json) >= RELIABLE_STORE_PAYLOAD_MAX_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    cJSON *json = cJSON_Parse(payload_json);
+    if (json == NULL || !cJSON_IsObject(json)) {
+        cJSON_Delete(json);
+        return ESP_ERR_INVALID_ARG;
+    }
+    cJSON_Delete(json);
+
+    state_lock();
+    if (s_boot_id == 0U) {
+        s_boot_id = esp_random();
+    }
+    reliable_store_record_t record = {0};
+    record.boot_id = s_boot_id;
+    record.sequence = ++s_sequence;
+    state_unlock();
+    time_t now = time(NULL);
+    record.timestamp_ms = now >= MQTT_VALID_UNIX_TIME ? (uint64_t)now * 1000ULL : 0ULL;
+    snprintf(record.event_type, sizeof(record.event_type), "%s", event_type);
+    record.payload_len = (uint16_t)strlen(payload_json);
+    memcpy(record.payload, payload_json, record.payload_len + 1U);
+    return reliable_store_append(&record);
 }
 
 /**
@@ -1207,6 +1353,8 @@ void mqtt_service_get_metrics(mqtt_service_metrics_t *metrics)
     memset(metrics, 0, sizeof(*metrics));
     offline_store_stats_t stats;
     offline_store_get_stats(&stats);
+    reliable_store_stats_t reliable_stats;
+    reliable_store_get_stats(&reliable_stats);
     metrics->offline_queued = stats.queued;
     metrics->offline_capacity = stats.capacity;
     metrics->offline_dropped = stats.dropped;
@@ -1215,6 +1363,12 @@ void mqtt_service_get_metrics(mqtt_service_metrics_t *metrics)
     metrics->offline_data_erase_count = stats.data_erase_count;
     metrics->offline_faulted = stats.faulted;
     metrics->offline_last_error = stats.last_error;
+    metrics->reliable_queued = reliable_stats.queued;
+    metrics->reliable_capacity = reliable_stats.capacity;
+    metrics->reliable_dropped = reliable_stats.dropped;
+    metrics->reliable_corrupted = reliable_stats.corrupted;
+    metrics->reliable_faulted = reliable_stats.faulted;
+    metrics->reliable_last_error = reliable_stats.last_error;
     edge_compute_result_t edge;
     edge_compute_get_snapshot(&edge);
     metrics->edge_temperature_ema = edge.temperature_ema;

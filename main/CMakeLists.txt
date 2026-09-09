@@ -13,6 +13,7 @@ idf_component_register(
         i2c_test
         mqtt_service
         offline_store
+        reliable_store
         modbus_service
         button
         oled_ssd1306

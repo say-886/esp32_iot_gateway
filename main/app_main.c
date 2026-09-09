@@ -12,6 +12,7 @@
 #include "mqtt_service.h"
 #include "modbus_service.h"
 #include "offline_store.h"
+#include "reliable_store.h"
 #include "oled_ssd1306.h"
 #include "ota_service.h"
 #include "sensor_aht20.h"
@@ -121,6 +122,11 @@ void app_main(void)
     esp_err_t offline_ret = offline_store_init();
     if (offline_ret != ESP_OK) {
         ESP_LOGW(TAG, "offline telemetry store unavailable: %s", esp_err_to_name(offline_ret));
+    }
+    esp_err_t reliable_ret = reliable_store_init();
+    if (reliable_ret != ESP_OK) {
+        ESP_LOGE(TAG, "reliable telemetry store unavailable: %s", esp_err_to_name(reliable_ret));
+        device_status_set_error(APP_ERR_STORAGE_FAILED);
     }
     ESP_ERROR_CHECK_WITHOUT_ABORT(modbus_service_init());
 
