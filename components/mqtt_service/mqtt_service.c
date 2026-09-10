@@ -1,5 +1,6 @@
 #include "mqtt_service.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -15,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mbedtls/md.h"
 #include "mqtt_client.h"
 #include "offline_store.h"
 #include "reliable_store.h"
@@ -27,12 +29,13 @@
 #define MQTT_RECONNECT_BASE_MS 1000U
 #define MQTT_RECONNECT_MAX_MS 30000U
 #define MQTT_REPLAY_PERIOD_MS 500U
-#define MQTT_RECENT_COMMAND_COUNT 8U
+#define MQTT_RECENT_COMMAND_COUNT STORAGE_COMMAND_HISTORY_COUNT
 #define MQTT_RAM_QUEUE_CAPACITY 8U
 #define MQTT_RELIABLE_BURST_MAX 4U
 #define MQTT_CAPTURED_OFFLINE_FLAG (1U << 0)
 #define MQTT_VALID_UNIX_TIME 1700000000LL
 #define MQTT_MIN_API_TOKEN_LENGTH 16U
+#define MQTT_MIN_COMMAND_SECRET_LENGTH 32U
 
 #ifndef APP_ALLOW_INSECURE_DEMO_MQTT
 #define APP_ALLOW_INSECURE_DEMO_MQTT 0
@@ -118,7 +121,7 @@ static char s_topic_cmd_ack[96];
 /** @brief 错误上报主题。*/
 static char s_topic_error[96];
 /** @brief 控制命令校验令牌。*/
-static char s_command_token[64];
+static char s_command_secret[65];
 
 /**
  * @brief 进入 MQTT 模块共享状态临界区。
@@ -174,6 +177,13 @@ static bool api_token_is_secure(const char *token)
            strcmp(token, "CHANGE_ME_BEFORE_DEPLOYMENT") != 0;
 }
 
+static bool command_secret_is_secure(const char *secret)
+{
+    return secret != NULL && strlen(secret) >= MQTT_MIN_COMMAND_SECRET_LENGTH &&
+           strcmp(secret, "CHANGE_ME_COMMAND_SECRET_BEFORE_DEPLOYMENT") != 0 &&
+           strncmp(secret, "REPLACE_WITH_RANDOM_COMMAND_SECRET", 34) != 0;
+}
+
 /**
  * @brief 判断 broker 是否属于公开演示地址。
  * @param host MQTT broker 主机名。
@@ -216,6 +226,11 @@ static esp_err_t validate_secure_mqtt_config(const app_config_t *config)
     if (!api_token_is_secure(config->api_token)) {
         ESP_LOGE(TAG, "MQTT rejected: API token is default or shorter than %u characters",
                  (unsigned int)MQTT_MIN_API_TOKEN_LENGTH);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!command_secret_is_secure(config->command_secret)) {
+        ESP_LOGE(TAG, "MQTT rejected: command secret is default or shorter than %u characters",
+                 (unsigned int)MQTT_MIN_COMMAND_SECRET_LENGTH);
         return ESP_ERR_INVALID_STATE;
     }
     return ESP_OK;
@@ -353,6 +368,70 @@ static bool json_get_bool(const cJSON *root, const char *key, bool *present, boo
     return false;
 }
 
+static bool json_get_u64(const cJSON *root, const char *key, uint64_t *value)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (!cJSON_IsNumber(item) || !isfinite(item->valuedouble) ||
+        item->valuedouble < 1.0 || item->valuedouble > 9007199254740991.0 ||
+        item->valuedouble != floor(item->valuedouble)) {
+        return false;
+    }
+    *value = (uint64_t)item->valuedouble;
+    return true;
+}
+
+static bool build_command_canonical(char *buffer,
+                                    size_t buffer_size,
+                                    const char *device_id,
+                                    const char *cmd_id,
+                                    const char *type,
+                                    uint64_t created_at,
+                                    uint64_t expires_at,
+                                    const device_cmd_t *cmd)
+{
+    if (buffer == NULL || buffer_size == 0U || device_id == NULL || cmd_id == NULL ||
+        type == NULL || cmd == NULL) {
+        return false;
+    }
+    int len = snprintf(buffer,
+                       buffer_size,
+                       "v1\n%s\n%s\n%s\n%llu\n%llu\n%c\n%c\n%c",
+                       device_id,
+                       cmd_id,
+                       type,
+                       (unsigned long long)created_at,
+                       (unsigned long long)expires_at,
+                       cmd->led_set ? (cmd->led_value ? '1' : '0') : '-',
+                       cmd->buzzer_set ? (cmd->buzzer_value ? '1' : '0') : '-',
+                       cmd->relay_set ? (cmd->relay_value ? '1' : '0') : '-');
+    return len >= 0 && len < (int)buffer_size;
+}
+
+static bool hmac_sha256_hex(const char *secret,
+                            const char *canonical,
+                            char output[65])
+{
+    if (!command_secret_is_secure(secret) || canonical == NULL || output == NULL) {
+        return false;
+    }
+    const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    unsigned char digest[32];
+    if (md_info == NULL ||
+        mbedtls_md_hmac(md_info,
+                        (const unsigned char *)secret,
+                        strlen(secret),
+                        (const unsigned char *)canonical,
+                        strlen(canonical),
+                        digest) != 0) {
+        return false;
+    }
+    for (size_t i = 0; i < sizeof(digest); ++i) {
+        snprintf(output + i * 2U, 3U, "%02x", digest[i]);
+    }
+    output[64] = '\0';
+    return true;
+}
+
 /**
  * @brief 检查命令 ID 是否已经执行过，用于抑制 QoS1 重复投递。
  * @param cmd_id 命令 ID。
@@ -376,15 +455,38 @@ static bool command_was_executed(const char *cmd_id)
  * @brief 记录最近执行过的命令 ID。
  * @param cmd_id 命令 ID。
  */
-static void remember_executed_command(const char *cmd_id)
+static esp_err_t remember_executed_command(const char *cmd_id)
 {
+    storage_command_history_t history = {0};
     state_lock();
-    snprintf(s_recent_cmd_ids[s_recent_cmd_next],
-             sizeof(s_recent_cmd_ids[s_recent_cmd_next]),
+    for (uint32_t i = 0; i < MQTT_RECENT_COMMAND_COUNT; ++i) {
+        snprintf(history.ids[i], sizeof(history.ids[i]), "%s", s_recent_cmd_ids[i]);
+    }
+    history.count = 0U;
+    for (uint32_t i = 0; i < MQTT_RECENT_COMMAND_COUNT; ++i) {
+        if (history.ids[i][0] != '\0') {
+            history.count++;
+        }
+    }
+    history.next = s_recent_cmd_next;
+    snprintf(history.ids[history.next], sizeof(history.ids[history.next]),
              "%s",
              cmd_id);
-    s_recent_cmd_next = (s_recent_cmd_next + 1U) % MQTT_RECENT_COMMAND_COUNT;
+    if (history.count < MQTT_RECENT_COMMAND_COUNT) {
+        history.count++;
+    }
+    history.next = (history.next + 1U) % MQTT_RECENT_COMMAND_COUNT;
+    /* Keep the state lock through the NVS write so concurrent MQTT callbacks
+     * cannot overwrite one another's command history snapshot. */
+    esp_err_t err = storage_save_command_history(&history);
+    if (err != ESP_OK) {
+        state_unlock();
+        return err;
+    }
+    memcpy(s_recent_cmd_ids, history.ids, sizeof(s_recent_cmd_ids));
+    s_recent_cmd_next = history.next;
     state_unlock();
+    return ESP_OK;
 }
 
 /**
@@ -465,7 +567,8 @@ static void handle_control_payload(const char *body, int len)
 
     const cJSON *cmd_id_item = cJSON_GetObjectItemCaseSensitive(root, "cmd_id");
     if (cJSON_IsString(cmd_id_item) && cmd_id_item->valuestring != NULL &&
-        cmd_id_item->valuestring[0] != '\0') {
+        cmd_id_item->valuestring[0] != '\0' &&
+        strlen(cmd_id_item->valuestring) < sizeof(cmd_id)) {
         snprintf(cmd_id, sizeof(cmd_id), "%s", cmd_id_item->valuestring);
     } else {
         cJSON_Delete(root);
@@ -473,43 +576,42 @@ static void handle_control_payload(const char *body, int len)
         return;
     }
 
+    const cJSON *device_id = cJSON_GetObjectItemCaseSensitive(root, "device_id");
+    if (!cJSON_IsString(device_id) || device_id->valuestring == NULL ||
+        strcmp(device_id->valuestring, s_device_id) != 0) {
+        cJSON_Delete(root);
+        publish_command_ack(cmd_id, "unauthorized", ESP_ERR_INVALID_STATE);
+        return;
+    }
+
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
-    if (type != NULL && (!cJSON_IsString(type) || strcmp(type->valuestring, "control") != 0)) {
+    if (!cJSON_IsString(type) || type->valuestring == NULL ||
+        strcmp(type->valuestring, "control") != 0) {
         cJSON_Delete(root);
         publish_command_ack(cmd_id, "rejected", ESP_ERR_NOT_SUPPORTED);
         return;
     }
 
-    const cJSON *auth = cJSON_GetObjectItemCaseSensitive(root, "auth");
-    if (!cJSON_IsString(auth) || auth->valuestring == NULL ||
-        !constant_time_equal(auth->valuestring, s_command_token)) {
-        cJSON_Delete(root);
-        ESP_LOGW(TAG, "MQTT command authentication failed: %s", cmd_id);
-        publish_command_ack(cmd_id, "unauthorized", ESP_ERR_INVALID_STATE);
-        return;
-    }
-
-    const cJSON *expires_at = cJSON_GetObjectItemCaseSensitive(root, "expires_at");
-    time_t now = time(NULL);
-    if (!cJSON_IsNumber(expires_at) || expires_at->valuedouble <= 0) {
+    uint64_t created_at_ms = 0U;
+    uint64_t expires_at_ms = 0U;
+    if (!json_get_u64(root, "created_at", &created_at_ms) ||
+        !json_get_u64(root, "expires_at", &expires_at_ms) ||
+        expires_at_ms <= created_at_ms || expires_at_ms - created_at_ms > 300000ULL) {
         cJSON_Delete(root);
         publish_command_ack(cmd_id, "rejected", ESP_ERR_INVALID_ARG);
         return;
     }
+
+    time_t now = time(NULL);
     if (now < MQTT_VALID_UNIX_TIME) {
         cJSON_Delete(root);
         publish_command_ack(cmd_id, "time_unavailable", ESP_ERR_INVALID_STATE);
         return;
     }
-    if ((double)now * 1000.0 > expires_at->valuedouble) {
+    uint64_t now_ms = (uint64_t)now * 1000ULL;
+    if (created_at_ms > now_ms + 300000ULL || now_ms > expires_at_ms) {
         cJSON_Delete(root);
         publish_command_ack(cmd_id, "expired", ESP_ERR_TIMEOUT);
-        return;
-    }
-
-    if (command_was_executed(cmd_id)) {
-        cJSON_Delete(root);
-        publish_command_ack(cmd_id, "duplicate", ESP_OK);
         return;
     }
 
@@ -520,19 +622,48 @@ static void handle_control_payload(const char *body, int len)
                  json_get_bool(control, "buzzer", &cmd.buzzer_set, &cmd.buzzer_value) &&
                  json_get_bool(control, "relay", &cmd.relay_set, &cmd.relay_value) &&
                  (cmd.led_set || cmd.buzzer_set || cmd.relay_set);
-    if (valid) {
-        device_status_update_control(&cmd);
-        remember_executed_command(cmd_id);
-    }
-    cJSON_Delete(root);
-
-    if (valid) {
-        ESP_LOGI(TAG, "MQTT command applied: %s", cmd_id);
-        publish_command_ack(cmd_id, "executed", ESP_OK);
-    } else {
-        ESP_LOGW(TAG, "invalid MQTT command payload: %s", cmd_id);
+    if (!valid) {
+        cJSON_Delete(root);
         publish_command_ack(cmd_id, "rejected", ESP_ERR_INVALID_ARG);
+        return;
     }
+
+    char canonical[256];
+    char expected_auth[65];
+    const cJSON *auth = cJSON_GetObjectItemCaseSensitive(root, "auth");
+    bool auth_valid = cJSON_IsString(auth) && auth->valuestring != NULL &&
+                      build_command_canonical(canonical,
+                                              sizeof(canonical),
+                                              s_device_id,
+                                              cmd_id,
+                                              "control",
+                                              created_at_ms,
+                                              expires_at_ms,
+                                              &cmd) &&
+                      hmac_sha256_hex(s_command_secret, canonical, expected_auth) &&
+                      constant_time_equal(auth->valuestring, expected_auth);
+    if (!auth_valid) {
+        cJSON_Delete(root);
+        ESP_LOGW(TAG, "MQTT command authentication failed: %s", cmd_id);
+        publish_command_ack(cmd_id, "unauthorized", ESP_ERR_INVALID_STATE);
+        return;
+    }
+
+    if (command_was_executed(cmd_id)) {
+        cJSON_Delete(root);
+        publish_command_ack(cmd_id, "duplicate", ESP_OK);
+        return;
+    }
+
+    if (remember_executed_command(cmd_id) != ESP_OK) {
+        cJSON_Delete(root);
+        publish_command_ack(cmd_id, "rejected", APP_ERR_STORAGE_FAILED);
+        return;
+    }
+    device_status_update_control(&cmd);
+    cJSON_Delete(root);
+    ESP_LOGI(TAG, "MQTT command applied: %s", cmd_id);
+    publish_command_ack(cmd_id, "executed", ESP_OK);
 }
 
 /**
@@ -996,10 +1127,19 @@ esp_err_t mqtt_service_start(void)
     if (err != ESP_OK) {
         return err;
     }
-    int token_len = snprintf(s_command_token, sizeof(s_command_token), "%s", config.api_token);
-    if (token_len < 0 || token_len >= (int)sizeof(s_command_token)) {
+    int secret_len = snprintf(s_command_secret, sizeof(s_command_secret), "%s", config.command_secret);
+    if (secret_len < 0 || secret_len >= (int)sizeof(s_command_secret)) {
         return ESP_ERR_INVALID_SIZE;
     }
+    storage_command_history_t command_history = {0};
+    err = storage_load_command_history(&command_history);
+    if (err != ESP_OK) {
+        return err;
+    }
+    state_lock();
+    memcpy(s_recent_cmd_ids, command_history.ids, sizeof(s_recent_cmd_ids));
+    s_recent_cmd_next = command_history.next;
+    state_unlock();
 
     int uri_len = snprintf(s_broker_uri,
                            sizeof(s_broker_uri),

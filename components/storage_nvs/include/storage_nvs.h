@@ -16,6 +16,7 @@ typedef struct {
     char mqtt_password[64];
     char device_id[32];
     char api_token[64];
+    char command_secret[65];
     uint32_t sample_period_ms;
     bool modbus_enabled;
     uint8_t modbus_slave_addr;
@@ -25,8 +26,20 @@ typedef struct {
     uint32_t modbus_poll_period_ms;
 } app_config_t;
 
+#define STORAGE_COMMAND_HISTORY_COUNT 8U
+#define STORAGE_COMMAND_ID_MAX_LEN 64U
+
+typedef struct {
+    uint32_t count;
+    uint32_t next;
+    char ids[STORAGE_COMMAND_HISTORY_COUNT][STORAGE_COMMAND_ID_MAX_LEN];
+} storage_command_history_t;
+
 /**
  * @brief 初始化 NVS 存储子系统。
+ *
+ * NVS 页不足或版本不兼容时返回错误，不会自动擦除分区。恢复出厂
+ * 必须由上层显式触发 storage_reset_config() 或现场维护流程执行。
  */
 esp_err_t storage_nvs_init(void);
 
@@ -50,5 +63,8 @@ esp_err_t storage_save_config(const app_config_t *config);
  * @brief 将配置重置为默认值并保存到 NVS。
  */
 esp_err_t storage_reset_config(void);
+
+esp_err_t storage_load_command_history(storage_command_history_t *history);
+esp_err_t storage_save_command_history(const storage_command_history_t *history);
 
 #endif

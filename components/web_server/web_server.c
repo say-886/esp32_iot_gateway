@@ -28,6 +28,7 @@ static httpd_handle_t s_server;
 static volatile bool s_ota_running;
 
 #define WEB_MIN_API_TOKEN_LENGTH 16U
+#define WEB_MIN_COMMAND_SECRET_LENGTH 32U
 
 typedef struct {
     char url[192];
@@ -90,6 +91,13 @@ static bool api_token_is_secure(const char *token)
 {
     return token != NULL && strlen(token) >= WEB_MIN_API_TOKEN_LENGTH &&
            strcmp(token, "CHANGE_ME_BEFORE_DEPLOYMENT") != 0;
+}
+
+static bool command_secret_is_secure(const char *secret)
+{
+    return secret != NULL && strlen(secret) >= WEB_MIN_COMMAND_SECRET_LENGTH &&
+           strcmp(secret, "CHANGE_ME_COMMAND_SECRET_BEFORE_DEPLOYMENT") != 0 &&
+           strncmp(secret, "REPLACE_WITH_RANDOM_COMMAND_SECRET", 34) != 0;
 }
 
 static void set_security_headers(httpd_req_t *req);
@@ -585,7 +593,8 @@ static esp_err_t config_get_handler(httpd_req_t *req)
                        sizeof(response),
                        "{\"wifi_ssid\":\"%s\",\"mqtt_host\":\"%s\",\"mqtt_port\":%u,"
                        "\"mqtt_use_tls\":%s,\"mqtt_username\":\"%s\","
-                       "\"device_id\":\"%s\",\"sample_period_ms\":%lu,"
+                       "\"device_id\":\"%s\",\"command_secret_configured\":%s,"
+                       "\"sample_period_ms\":%lu,"
                        "\"modbus_enabled\":%s,\"modbus_slave_addr\":%u,"
                        "\"modbus_baud_rate\":%lu,\"modbus_start_register\":%u,"
                        "\"modbus_register_count\":%u,\"modbus_poll_period_ms\":%lu,"
@@ -596,6 +605,7 @@ static esp_err_t config_get_handler(httpd_req_t *req)
                        config.mqtt_use_tls ? "true" : "false",
                        config.mqtt_username,
                        config.device_id,
+                       command_secret_is_secure(config.command_secret) ? "true" : "false",
                        (unsigned long)config.sample_period_ms,
                        config.modbus_enabled ? "true" : "false",
                        (unsigned int)config.modbus_slave_addr,
@@ -643,6 +653,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
                  json_copy_optional_string(root, "mqtt_password", config.mqtt_password, sizeof(config.mqtt_password)) &&
                  json_copy_optional_string(root, "device_id", config.device_id, sizeof(config.device_id)) &&
                  json_copy_optional_string(root, "api_token", config.api_token, sizeof(config.api_token)) &&
+                 json_copy_optional_string(root, "command_secret", config.command_secret, sizeof(config.command_secret)) &&
                  json_copy_optional_u32(root, "sample_period_ms", &config.sample_period_ms) &&
                  json_get_bool(root, "modbus_enabled", &modbus_enabled_present, &config.modbus_enabled) &&
                  json_copy_optional_u16_allow_zero(root, "modbus_start_register", &config.modbus_start_register) &&
@@ -651,7 +662,8 @@ static esp_err_t config_post_handler(httpd_req_t *req)
                  json_copy_optional_u32(root, "modbus_poll_period_ms", &config.modbus_poll_period_ms) &&
                  storage_validate_config(&config) == ESP_OK &&
                  wifi_credentials_are_configured(&config) &&
-                 api_token_is_secure(config.api_token);
+                 api_token_is_secure(config.api_token) &&
+                 command_secret_is_secure(config.command_secret);
     uint16_t slave_addr = config.modbus_slave_addr;
     if (valid) {
         valid = json_copy_optional_u16(root, "modbus_slave_addr", &slave_addr) && slave_addr <= 247;

@@ -1,0 +1,33 @@
+name: iot-gateway-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cloud-backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: esp32_gateway/esp32_iot_gateway/cloud_backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: esp32_gateway/esp32_iot_gateway/cloud_backend/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:auth
+      - run: npm run test:api-auth
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: espressif/install-esp-idf-action@v1
+        with:
+          version: v5.3.2
+      - working-directory: esp32_gateway/esp32_iot_gateway
+        run: idf.py build

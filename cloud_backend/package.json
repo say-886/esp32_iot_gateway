@@ -6,7 +6,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js"
+    "check": "node --check server.js",
+    "test:auth": "node command_auth_test.js",
+    "test:api-auth": "node api_auth_test.js"
   },
   "dependencies": {
     "mqtt": "^5.14.1"

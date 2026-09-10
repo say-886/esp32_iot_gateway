@@ -117,7 +117,17 @@ void app_main(void)
     }
 
     // 初始化 NVS 存储，用于保存应用配置和状态快照，例如 WiFi 配置、MQTT 主题等。
-    ESP_ERROR_CHECK(storage_nvs_init());
+    // NVS 异常时不得自动擦除分区；停止依赖配置的服务并保留诊断日志，
+    // 由现场维护流程执行有意的恢复出厂操作。
+    esp_err_t nvs_ret = storage_nvs_init();
+    if (nvs_ret != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "NVS initialization failed: %s; configuration was preserved "
+                 "and automatic erase is disabled",
+                 esp_err_to_name(nvs_ret));
+        device_status_set_error(APP_ERR_STORAGE_FAILED);
+        return;
+    }
     ESP_ERROR_CHECK(edge_compute_init());
     esp_err_t offline_ret = offline_store_init();
     if (offline_ret != ESP_OK) {

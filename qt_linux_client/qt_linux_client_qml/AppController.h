@@ -135,6 +135,7 @@ private:
     QString m_host;
     int m_port;
     QString m_token;
+    QString m_commandSecret;
 
     QString m_connectionStatus;
     QString m_dashboardTemperature;

@@ -26,6 +26,19 @@ const CONFIG_FILE = process.env.IOT_CONFIG_FILE
   ? path.resolve(process.env.IOT_CONFIG_FILE)
   : path.join(ROOT, "config.local.json");
 const CONFIG_EXAMPLE_FILE = path.join(ROOT, "config.example.json");
+const MIN_COMMAND_SECRET_LENGTH = 32;
+const INSECURE_COMMAND_SECRET_PATTERN = /^(YOUR_|REPLACE_|CHANGE_ME|example|test$)/i;
+const COMMAND_ACK_STATUSES = new Set([
+  "executed",
+  "rejected",
+  "expired",
+  "duplicate",
+  "unauthorized",
+  "time_unavailable"
+]);
+const apiKeys = new Map();
+if (process.env.IOT_ADMIN_API_KEY) apiKeys.set(process.env.IOT_ADMIN_API_KEY, "admin");
+if (process.env.IOT_OPERATOR_API_KEY) apiKeys.set(process.env.IOT_OPERATOR_API_KEY, "operator");
 
 function readJsonFile(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -46,10 +59,40 @@ function loadConfig() {
   loaded.mqtt.topicRoot ??= "esp32/gateway";
   loaded.mqtt.clientId ??= `gateway_backend_${crypto.randomUUID().slice(0, 8)}`;
   loaded.mqtt.defaultDeviceId ??= "esp32_gateway_001";
+  loaded.mqtt.commandSecret ??= "";
+  loaded.mqtt.devices ??= {};
+  if (process.env.IOT_COMMAND_SECRET) {
+    loaded.mqtt.commandSecret = process.env.IOT_COMMAND_SECRET;
+  }
   return loaded;
 }
 
 const config = loadConfig();
+
+function validateCommandSecret(secret) {
+  if (typeof secret !== "string" || secret.length < MIN_COMMAND_SECRET_LENGTH) {
+    throw new Error(
+      `command secret must be at least ${MIN_COMMAND_SECRET_LENGTH} characters`
+    );
+  }
+  if (INSECURE_COMMAND_SECRET_PATTERN.test(secret)) {
+    throw new Error("command secret must not be a placeholder or demo token");
+  }
+}
+
+const defaultDeviceSecret = config.mqtt.devices?.[config.mqtt.defaultDeviceId]?.commandSecret;
+if (defaultDeviceSecret) {
+  validateCommandSecret(defaultDeviceSecret);
+} else {
+  validateCommandSecret(config.mqtt.commandSecret);
+}
+for (const [deviceId, deviceConfig] of Object.entries(config.mqtt.devices || {})) {
+  if (!deviceConfig || typeof deviceConfig.commandSecret !== "string") {
+    throw new Error(`mqtt.devices.${deviceId}.commandSecret is required`);
+  }
+  validateCommandSecret(deviceConfig.commandSecret);
+}
+
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 /**
@@ -116,6 +159,28 @@ database.exec(`
     ON commands(device_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_commands_status_expiry
     ON commands(status, expires_at);
+
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    role TEXT NOT NULL,
+    action TEXT NOT NULL,
+    device_id TEXT,
+    cmd_id TEXT,
+    outcome TEXT NOT NULL,
+    source_ip TEXT,
+    detail_json TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(occurred_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_audit_device ON audit_log(device_id, occurred_at DESC);
+  CREATE TABLE IF NOT EXISTS device_shadow (
+    device_id TEXT PRIMARY KEY,
+    desired_json TEXT NOT NULL DEFAULT '{}',
+    reported_json TEXT NOT NULL DEFAULT '{}',
+    version INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  );
 `);
 
 const statements = {
@@ -172,8 +237,43 @@ const statements = {
     SET status = 'ACKED', acked_at = ?, ack_status = ?, result_code = ?,
         ack_json = ?, error = NULL
     WHERE cmd_id = ? AND device_id = ? AND status IN ('PENDING', 'PUBLISHED', 'TIMEOUT')
-  `)
+  `),
+  insertAudit: database.prepare(`
+    INSERT INTO audit_log
+      (occurred_at, actor, role, action, device_id, cmd_id, outcome, source_ip, detail_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  upsertShadowDesired: database.prepare(`
+    INSERT INTO device_shadow (device_id, desired_json, reported_json, version, updated_at)
+    VALUES (?, ?, '{}', 1, ?)
+    ON CONFLICT(device_id) DO UPDATE SET desired_json = excluded.desired_json,
+      version = device_shadow.version + 1, updated_at = excluded.updated_at
+  `),
+  getShadow: database.prepare("SELECT * FROM device_shadow WHERE device_id = ?")
 };
+
+function authorizeCommandRequest(req) {
+  const key = String(req.headers["x-api-key"] || "");
+  const role = apiKeys.get(key);
+  if (role === "admin" || role === "operator") {
+    return { actor: role, role };
+  }
+  return null;
+}
+
+function auditCommand(req, identity, deviceId, cmdId, outcome, detail = {}) {
+  statements.insertAudit.run(
+    nowIso(),
+    identity?.actor || "anonymous",
+    identity?.role || "none",
+    "create_command",
+    deviceId || null,
+    cmdId || null,
+    outcome,
+    String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown"),
+    JSON.stringify(detail)
+  );
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -224,6 +324,16 @@ function touchDevice(deviceId, payload, messageType) {
     messageType === "heartbeat" ? JSON.stringify(payload) : null,
     messageType === "error" ? JSON.stringify(payload) : null
   );
+  if (messageType === "status") {
+    const current = statements.getShadow.get(deviceId);
+    const reported = { ...(current ? JSON.parse(current.reported_json) : {}), ...payload };
+    database.prepare(`
+      INSERT INTO device_shadow (device_id, desired_json, reported_json, version, updated_at)
+      VALUES (?, '{}', ?, 0, ?)
+      ON CONFLICT(device_id) DO UPDATE SET reported_json = excluded.reported_json,
+        updated_at = excluded.updated_at
+    `).run(deviceId, JSON.stringify(reported), timestamp);
+  }
 }
 
 /**
@@ -305,9 +415,21 @@ function handleCommandAck(deviceId, payload) {
   if (!cmdId) {
     return;
   }
+  const payloadDeviceId = String(payload.device_id || "").trim();
+  if (!payloadDeviceId || payloadDeviceId !== deviceId) {
+    console.warn(
+      `[command] ACK device mismatch cmd_id=${cmdId} topic_device=${deviceId} payload_device=${payloadDeviceId || "missing"}`
+    );
+    return;
+  }
+  const ackStatus = String(payload.status || "").trim();
+  if (!COMMAND_ACK_STATUSES.has(ackStatus)) {
+    console.warn(`[command] invalid ACK status cmd_id=${cmdId} status=${ackStatus || "empty"}`);
+    return;
+  }
   statements.markAcknowledged.run(
     nowIso(),
-    String(payload.status || "unknown"),
+    ackStatus,
     Math.trunc(finiteNumber(payload.code, 0)),
     JSON.stringify(payload),
     cmdId,
@@ -467,12 +589,23 @@ function createCommand(deviceId, input) {
   const createdAt = Date.now();
   const ttlMs = Math.max(1000, Math.min(300000, finiteNumber(input.ttl_ms, config.server.commandTimeoutMs)));
   const expiresAt = createdAt + ttlMs;
+  const commandSecret = getCommandSecret(deviceId);
+  const canonical = commandCanonical(
+    deviceId,
+    cmdId,
+    "control",
+    createdAt,
+    expiresAt,
+    normalizedControl
+  );
   const envelope = {
     schema: 1,
+    device_id: deviceId,
     cmd_id: cmdId,
     type: "control",
     created_at: createdAt,
     expires_at: expiresAt,
+    auth: signCommand(commandSecret, canonical),
     payload: normalizedControl
   };
   statements.insertCommand.run(
@@ -484,7 +617,37 @@ function createCommand(deviceId, input) {
     expiresAt
   );
   dispatchPendingCommands();
-  return { cmd_id: cmdId, device_id: deviceId, status: "PENDING", envelope };
+  const { auth: _auth, ...publicEnvelope } = envelope;
+  return { cmd_id: cmdId, device_id: deviceId, status: "PENDING", envelope: publicEnvelope };
+}
+
+function getCommandSecret(deviceId) {
+  const deviceConfig = config.mqtt.devices?.[deviceId];
+  const secret = deviceConfig?.commandSecret ||
+    (deviceId === config.mqtt.defaultDeviceId ? config.mqtt.commandSecret : "");
+  if (!secret) {
+    throw new Error(`command secret is not configured for device ${deviceId}`);
+  }
+  validateCommandSecret(secret);
+  return secret;
+}
+
+function commandCanonical(deviceId, cmdId, type, createdAt, expiresAt, control) {
+  return [
+    "v1",
+    deviceId,
+    cmdId,
+    type,
+    String(createdAt),
+    String(expiresAt),
+    Object.prototype.hasOwnProperty.call(control, "led") ? String(control.led) : "-",
+    Object.prototype.hasOwnProperty.call(control, "buzzer") ? String(control.buzzer) : "-",
+    Object.prototype.hasOwnProperty.call(control, "relay") ? String(control.relay) : "-"
+  ].join("\n");
+}
+
+function signCommand(secret, canonical) {
+  return crypto.createHmac("sha256", secret).update(canonical, "utf8").digest("hex");
 }
 
 function sendJson(res, statusCode, body) {
@@ -529,6 +692,26 @@ function telemetryRow(row) {
       anomaly_flags: row.edge_anomaly_flags
     }
   };
+}
+
+function publicCommandRow(command) {
+  if (!command) {
+    return null;
+  }
+  const result = { ...command };
+  if (typeof result.payload_json === "string") {
+    try {
+      const envelope = JSON.parse(result.payload_json);
+      if (envelope && typeof envelope === "object") {
+        delete envelope.auth;
+        result.payload_json = JSON.stringify(envelope);
+      }
+    } catch {
+      // A malformed historical payload may still contain an auth field.
+      result.payload_json = JSON.stringify({ redacted: true });
+    }
+  }
+  return result;
 }
 
 function queryTelemetry(deviceId, limit) {
@@ -641,14 +824,23 @@ async function handleRequest(req, res) {
       const commands = database.prepare(`
         SELECT * FROM commands WHERE device_id = ? ORDER BY created_at DESC LIMIT ?
       `).all(deviceId, limit);
-      sendJson(res, 200, { ok: true, data: commands });
+      sendJson(res, 200, { ok: true, data: commands.map(publicCommandRow) });
       return;
     }
     if (req.method === "POST" && segments[3] === "commands") {
+      const identity = authorizeCommandRequest(req);
+      if (!identity) {
+        auditCommand(req, null, deviceId, null, "denied", { reason: "missing_or_invalid_api_key" });
+        sendJson(res, 401, { ok: false, error: "API key required" });
+        return;
+      }
       try {
         const input = JSON.parse((await readBody(req, 8192)) || "{}");
-        sendJson(res, 202, { ok: true, ...createCommand(deviceId, input) });
+        const result = createCommand(deviceId, input);
+        auditCommand(req, identity, deviceId, result.cmd_id, "accepted");
+        sendJson(res, 202, { ok: true, ...result });
       } catch (error) {
+        auditCommand(req, identity, deviceId, null, "rejected", { reason: error.message });
         sendJson(res, 400, { ok: false, error: error.message });
       }
       return;
@@ -660,19 +852,80 @@ async function handleRequest(req, res) {
     if (!command) {
       sendJson(res, 404, { ok: false, error: "command not found" });
     } else {
-      sendJson(res, 200, { ok: true, data: command });
+      sendJson(res, 200, { ok: true, data: publicCommandRow(command) });
     }
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/cmd") {
+    const identity = authorizeCommandRequest(req);
+    if (!identity) {
+      auditCommand(req, null, null, null, "denied", { reason: "missing_or_invalid_api_key" });
+      sendJson(res, 401, { ok: false, error: "API key required" });
+      return;
+    }
+    if (req.method === "GET" && segments[3] === "shadow") {
+      const shadow = statements.getShadow.get(deviceId) || {
+        device_id: deviceId, desired_json: "{}", reported_json: "{}", version: 0, updated_at: null
+      };
+      sendJson(res, 200, {
+        ok: true,
+        data: {
+          device_id: deviceId,
+          desired: JSON.parse(shadow.desired_json),
+          reported: JSON.parse(shadow.reported_json),
+          version: shadow.version,
+          updated_at: shadow.updated_at
+        }
+      });
+      return;
+    }
+    if (req.method === "PUT" && segments[3] === "shadow" && segments.length === 4) {
+      const identity = authorizeCommandRequest(req);
+      if (!identity) {
+        sendJson(res, 401, { ok: false, error: "API key required" });
+        return;
+      }
+      try {
+        const input = JSON.parse((await readBody(req, 8192)) || "{}");
+        const desired = input.desired;
+        if (!desired || typeof desired !== "object" || Array.isArray(desired)) {
+          throw new Error("desired must be a JSON object");
+        }
+        statements.upsertShadowDesired.run(deviceId, JSON.stringify(desired), nowIso());
+        const shadow = statements.getShadow.get(deviceId);
+        auditCommand(req, identity, deviceId, null, "shadow_updated", { version: shadow.version });
+        sendJson(res, 200, { ok: true, data: { device_id: deviceId, desired, version: shadow.version } });
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: error.message });
+      }
+      return;
+    }
     try {
       const input = JSON.parse((await readBody(req, 8192)) || "{}");
       const deviceId = String(input.device_id || config.mqtt.defaultDeviceId).trim();
-      sendJson(res, 202, { ok: true, ...createCommand(deviceId, input) });
+      const result = createCommand(deviceId, input);
+      auditCommand(req, identity, deviceId, result.cmd_id, "accepted");
+      sendJson(res, 202, { ok: true, ...result });
     } catch (error) {
+      auditCommand(req, identity, null, null, "rejected", { reason: error.message });
       sendJson(res, 400, { ok: false, error: error.message });
     }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/audit") {
+    const identity = authorizeCommandRequest(req);
+    if (!identity) {
+      sendJson(res, 401, { ok: false, error: "API key required" });
+      return;
+    }
+    const limit = Math.max(1, Math.min(500, finiteNumber(url.searchParams.get("limit"), 100)));
+    const rows = database.prepare(`
+      SELECT id, occurred_at, actor, role, action, device_id, cmd_id, outcome, source_ip, detail_json
+      FROM audit_log ORDER BY id DESC LIMIT ?
+    `).all(limit);
+    sendJson(res, 200, { ok: true, data: rows });
     return;
   }
 
@@ -685,7 +938,7 @@ async function handleRequest(req, res) {
       latest,
       points: database.prepare("SELECT COUNT(*) AS count FROM telemetry").get().count,
       devices: deviceCount,
-      lastCommand: command || null,
+      lastCommand: publicCommandRow(command),
       mqtt: {
         connected: mqttConnected,
         host: config.mqtt.host,
@@ -693,6 +946,21 @@ async function handleRequest(req, res) {
         topicRoot: config.mqtt.topicRoot
       }
     });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/metrics") {
+    const counts = database.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM devices) AS devices_total,
+        (SELECT COUNT(*) FROM devices WHERE online = 1) AS devices_online,
+        (SELECT COUNT(*) FROM telemetry) AS telemetry_total,
+        (SELECT COUNT(*) FROM commands) AS commands_total,
+        (SELECT COUNT(*) FROM commands WHERE status = 'ACKED') AS commands_acked,
+        (SELECT COUNT(*) FROM commands WHERE status IN ('TIMEOUT', 'FAILED')) AS commands_failed,
+        (SELECT COUNT(*) FROM audit_log) AS audit_total
+    `).get();
+    sendJson(res, 200, { ok: true, data: { ...counts, mqtt_connected: mqttConnected } });
     return;
   }
 
@@ -720,7 +988,7 @@ const commandTimer = setInterval(() => {
 }, 1000);
 commandTimer.unref();
 
-function shutdown(signal) {
+function shutdown(signal, exitProcess = true) {
   if (shuttingDown) {
     return;
   }
@@ -733,7 +1001,9 @@ function shutdown(signal) {
   server.close(() => {
     mqttClient.end(true, {}, () => {
       database.close();
-      process.exit(0);
+      if (exitProcess) {
+        process.exit(0);
+      }
     });
   });
 }
@@ -750,5 +1020,10 @@ module.exports = {
   normalizeTelemetry,
   parseTopic,
   createCommand,
-  handleMqttMessage
+  handleMqttMessage,
+  commandCanonical,
+  signCommand,
+  server,
+  database,
+  shutdownForTest: () => shutdown("TEST", false)
 };

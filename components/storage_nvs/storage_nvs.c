@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
@@ -14,9 +15,12 @@
 #define STORAGE_NAMESPACE "gateway"
 #define STORAGE_KEY_LEGACY_CONFIG "app_config"
 #define STORAGE_KEY_V2_CONFIG "app_cfg_v2"
-#define STORAGE_KEY_CONFIG "app_cfg_v3"
+#define STORAGE_KEY_CONFIG_V3 "app_cfg_v3"
+#define STORAGE_KEY_CONFIG "app_cfg_v4"
+#define STORAGE_KEY_COMMAND_HISTORY "cmd_history"
 #define STORAGE_CONFIG_MAGIC 0x47434647U
-#define STORAGE_CONFIG_VERSION 3U
+#define STORAGE_CONFIG_VERSION 4U
+static const char *TAG = "storage_nvs";
 
 #ifndef APP_DEFAULT_WIFI_SSID
 #define APP_DEFAULT_WIFI_SSID "YOUR_WIFI_SSID"
@@ -45,11 +49,14 @@
 #ifndef APP_DEFAULT_API_TOKEN
 #define APP_DEFAULT_API_TOKEN "CHANGE_ME_BEFORE_DEPLOYMENT"
 #endif
+#ifndef APP_DEFAULT_COMMAND_SECRET
+#define APP_DEFAULT_COMMAND_SECRET "CHANGE_ME_COMMAND_SECRET_BEFORE_DEPLOYMENT"
+#endif
 #ifndef APP_DEFAULT_SAMPLE_PERIOD_MS
 #define APP_DEFAULT_SAMPLE_PERIOD_MS 2000
 #endif
 #ifndef APP_DEFAULT_MODBUS_ENABLED
-#define APP_DEFAULT_MODBUS_ENABLED false
+#define APP_DEFAULT_MODBUS_ENABLED true
 #endif
 #ifndef APP_DEFAULT_MODBUS_SLAVE_ADDR
 #define APP_DEFAULT_MODBUS_SLAVE_ADDR 1
@@ -76,12 +83,39 @@ typedef struct {
     uint32_t sample_period_ms;
 } app_config_v2_t;
 
+/* v3 layout retained for safe migration after adding command_secret. */
+typedef struct {
+    char wifi_ssid[32];
+    char wifi_password[64];
+    char mqtt_host[64];
+    uint16_t mqtt_port;
+    bool mqtt_use_tls;
+    char mqtt_username[32];
+    char mqtt_password[64];
+    char device_id[32];
+    char api_token[64];
+    uint32_t sample_period_ms;
+    bool modbus_enabled;
+    uint8_t modbus_slave_addr;
+    uint32_t modbus_baud_rate;
+    uint16_t modbus_start_register;
+    uint16_t modbus_register_count;
+    uint32_t modbus_poll_period_ms;
+} app_config_v3_t;
+
 typedef struct {
     uint32_t magic;
     uint16_t version;
     uint16_t config_size;
     app_config_v2_t config;
 } storage_config_record_v2_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t config_size;
+    app_config_v3_t config;
+} storage_config_record_v3_t;
 
 typedef struct {
     uint32_t magic;
@@ -100,6 +134,7 @@ static const app_config_t DEFAULT_CONFIG = {
     .mqtt_password = APP_DEFAULT_MQTT_PASSWORD,
     .device_id = APP_DEFAULT_DEVICE_ID,
     .api_token = APP_DEFAULT_API_TOKEN,
+    .command_secret = APP_DEFAULT_COMMAND_SECRET,
     .sample_period_ms = APP_DEFAULT_SAMPLE_PERIOD_MS,
     .modbus_enabled = APP_DEFAULT_MODBUS_ENABLED,
     .modbus_slave_addr = APP_DEFAULT_MODBUS_SLAVE_ADDR,
@@ -136,6 +171,7 @@ static void sanitize_config(app_config_t *config)
     config->mqtt_password[sizeof(config->mqtt_password) - 1] = '\0';
     config->device_id[sizeof(config->device_id) - 1] = '\0';
     config->api_token[sizeof(config->api_token) - 1] = '\0';
+    config->command_secret[sizeof(config->command_secret) - 1] = '\0';
 
     if (config->mqtt_host[0] == '\0') {
         memcpy(config->mqtt_host, DEFAULT_CONFIG.mqtt_host, sizeof(config->mqtt_host));
@@ -145,6 +181,10 @@ static void sanitize_config(app_config_t *config)
     }
     if (config->device_id[0] == '\0') {
         memcpy(config->device_id, DEFAULT_CONFIG.device_id, sizeof(config->device_id));
+    }
+    if (config->command_secret[0] == '\0') {
+        memcpy(config->command_secret, DEFAULT_CONFIG.command_secret,
+               sizeof(config->command_secret));
     }
     if (config->sample_period_ms < 500 || config->sample_period_ms > 60000) {
         config->sample_period_ms = DEFAULT_CONFIG.sample_period_ms;
@@ -174,6 +214,8 @@ static bool config_equal(const app_config_t *left, const app_config_t *right)
            memcmp(left->mqtt_password, right->mqtt_password, sizeof(left->mqtt_password)) == 0 &&
            memcmp(left->device_id, right->device_id, sizeof(left->device_id)) == 0 &&
            memcmp(left->api_token, right->api_token, sizeof(left->api_token)) == 0 &&
+           memcmp(left->command_secret, right->command_secret,
+                  sizeof(left->command_secret)) == 0 &&
            left->sample_period_ms == right->sample_period_ms &&
            left->modbus_enabled == right->modbus_enabled &&
            left->modbus_slave_addr == right->modbus_slave_addr &&
@@ -191,6 +233,7 @@ esp_err_t storage_validate_config(const app_config_t *config)
     if (config->mqtt_host[0] == '\0' || config->mqtt_port == 0 ||
         config->device_id[0] == '\0' ||
         config->api_token[0] == '\0' ||
+        config->command_secret[0] == '\0' ||
         config->sample_period_ms < 500 || config->sample_period_ms > 60000 ||
         config->modbus_slave_addr == 0 || config->modbus_slave_addr > 247 ||
         config->modbus_baud_rate < 1200 || config->modbus_baud_rate > 1000000 ||
@@ -222,6 +265,36 @@ static esp_err_t load_from_nvs(app_config_t *config)
         record.config_size == sizeof(app_config_t)) {
         *config = record.config;
     } else {
+        storage_config_record_v3_t record_v3 = {0};
+        size = sizeof(record_v3);
+        esp_err_t v3_err = nvs_get_blob(handle, STORAGE_KEY_CONFIG_V3, &record_v3, &size);
+        if (v3_err == ESP_OK && size == sizeof(record_v3) &&
+            record_v3.magic == STORAGE_CONFIG_MAGIC &&
+            record_v3.version == 3U &&
+            record_v3.config_size == sizeof(app_config_v3_t)) {
+            *config = DEFAULT_CONFIG;
+            memcpy(config->wifi_ssid, record_v3.config.wifi_ssid, sizeof(config->wifi_ssid));
+            memcpy(config->wifi_password, record_v3.config.wifi_password, sizeof(config->wifi_password));
+            memcpy(config->mqtt_host, record_v3.config.mqtt_host, sizeof(config->mqtt_host));
+            config->mqtt_port = record_v3.config.mqtt_port;
+            config->mqtt_use_tls = record_v3.config.mqtt_use_tls;
+            memcpy(config->mqtt_username, record_v3.config.mqtt_username, sizeof(config->mqtt_username));
+            memcpy(config->mqtt_password, record_v3.config.mqtt_password, sizeof(config->mqtt_password));
+            memcpy(config->device_id, record_v3.config.device_id, sizeof(config->device_id));
+            memcpy(config->api_token, record_v3.config.api_token, sizeof(config->api_token));
+            memcpy(config->command_secret, record_v3.config.api_token,
+                   sizeof(record_v3.config.api_token));
+            config->command_secret[sizeof(config->command_secret) - 1] = '\0';
+            config->sample_period_ms = record_v3.config.sample_period_ms;
+            config->modbus_enabled = record_v3.config.modbus_enabled;
+            config->modbus_slave_addr = record_v3.config.modbus_slave_addr;
+            config->modbus_baud_rate = record_v3.config.modbus_baud_rate;
+            config->modbus_start_register = record_v3.config.modbus_start_register;
+            config->modbus_register_count = record_v3.config.modbus_register_count;
+            config->modbus_poll_period_ms = record_v3.config.modbus_poll_period_ms;
+            ESP_LOGW(TAG, "migrated v3 config: command_secret temporarily reuses api_token; rotate it");
+            err = ESP_OK;
+        } else {
         storage_config_record_v2_t record_v2 = {0};
         size = sizeof(record_v2);
         err = nvs_get_blob(handle, STORAGE_KEY_V2_CONFIG, &record_v2, &size);
@@ -253,6 +326,7 @@ static esp_err_t load_from_nvs(app_config_t *config)
                 err = ESP_OK;
             }
         }
+        }
     }
     nvs_close(handle);
 
@@ -266,8 +340,18 @@ esp_err_t storage_nvs_init(void)
 {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
+        /*
+         * Never erase the default NVS partition as an automatic recovery
+         * action.  This partition also contains Wi-Fi, MQTT, credentials,
+         * device identity and other application data.  A full erase here
+         * would silently destroy the device configuration.  Surface the
+         * error to the caller so a deliberate, operator-controlled recovery
+         * procedure can be used instead.
+        */
+        ESP_LOGE(TAG,
+                 "NVS requires recovery (%s); automatic erase is disabled",
+                 esp_err_to_name(err));
+        return err;
     }
     if (err != ESP_OK) {
         return err;
@@ -367,4 +451,56 @@ esp_err_t storage_save_config(const app_config_t *config)
 esp_err_t storage_reset_config(void)
 {
     return storage_save_config(&DEFAULT_CONFIG);
+}
+
+esp_err_t storage_load_command_history(storage_command_history_t *history)
+{
+    if (history == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(history, 0, sizeof(*history));
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(STORAGE_NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+    size_t size = sizeof(*history);
+    err = nvs_get_blob(handle, STORAGE_KEY_COMMAND_HISTORY, history, &size);
+    nvs_close(handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        memset(history, 0, sizeof(*history));
+        return ESP_OK;
+    }
+    if (err != ESP_OK || size != sizeof(*history) ||
+        history->count > STORAGE_COMMAND_HISTORY_COUNT ||
+        history->next >= STORAGE_COMMAND_HISTORY_COUNT) {
+        memset(history, 0, sizeof(*history));
+        return err == ESP_OK ? ESP_ERR_INVALID_SIZE : err;
+    }
+    for (uint32_t i = 0; i < STORAGE_COMMAND_HISTORY_COUNT; ++i) {
+        history->ids[i][STORAGE_COMMAND_ID_MAX_LEN - 1U] = '\0';
+    }
+    return ESP_OK;
+}
+
+esp_err_t storage_save_command_history(const storage_command_history_t *history)
+{
+    if (history == NULL || history->count > STORAGE_COMMAND_HISTORY_COUNT ||
+        history->next >= STORAGE_COMMAND_HISTORY_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_blob(handle, STORAGE_KEY_COMMAND_HISTORY, history, sizeof(*history));
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
 }

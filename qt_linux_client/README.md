@@ -49,6 +49,7 @@ qt_linux_client/
 - MQTT 增强：读取设备返回的 topic，支持订阅和命令发布
 - 可靠重连：约 1/2/4/8/16/30 秒指数退避并带随机抖动
 - 新协议：支持嵌套 `data` 遥测、`cmd_ack` 和带 UUID/有效期的命令
+- MQTT 控制：使用独立 `command_secret` 生成 HMAC-SHA256 签名；未输入命令密钥时自动回退 HTTP
 - 幂等历史：SQLite 增加 `device_id/boot_id/seq/replayed` 并安全迁移旧表
 
 ## 当前实现说明
@@ -95,7 +96,10 @@ Authorization: Bearer <token>
 - MQTT 可用时优先走 MQTT
 - MQTT 不可用时回退到 HTTP
 - MQTT 命令使用 QoS 1，并生成 `cmd_id`、`created_at`、`expires_at`
+- MQTT 命令签名使用设备独立 `command_secret`，canonical 格式为 `v1\ndevice_id\ncmd_id\ncontrol\ncreated_at\nexpires_at\nled\nbuzzer\nrelay`
 - 收到 `cmd_ack` 后在日志中显示 `executed/rejected/expired/duplicate`
+
+命令密钥不会由设备接口明文回填。首次配置或轮换密钥时，在“设备配置”页面输入至少 32 位的 `command_secret` 并保存；之后 Qt 客户端当前会话可使用 MQTT 直连控制。未输入该密钥时，控制请求自动使用已鉴权的 HTTP 链路。
 
 ### 3. 本地数据
 

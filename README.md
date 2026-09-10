@@ -23,13 +23,14 @@ idf.py -p COMx flash monitor
 复制
 `components/storage_nvs/include/storage_nvs_local.example.h` 为
 `storage_nvs_local.h`，填写真实 Wi-Fi、私有 MQTTS Broker、Broker 用户名/
-密码以及至少 16 字符的随机 API Token。该私有文件已加入 `.gitignore`。
+密码、至少 16 字符的随机 API Token，以及至少 32 字符的随机
+`command_secret`。该私有文件已加入 `.gitignore`。
 
 安全默认行为：
 
 - SNTP 时间有效后才启动 MQTTS；
 - 拒绝明文 MQTT、已知公共演示 Broker、空 Broker 凭据和默认/弱 Token；
-- MQTT 控制命令必须携带 `cmd_id`、`expires_at` 和 `auth`；
+- MQTT 控制命令必须携带 `device_id`、`cmd_id`、`created_at`、`expires_at` 和基于 `command_secret` 的 HMAC-SHA256 `auth`；
 - 默认 Token 下，HTTP 修改接口保持禁用；HTTP 管理面仅用于可信局域网；
 - OTA 仅接受 HTTPS，并在 60 秒任务健康窗口后确认新镜像。
 
@@ -39,7 +40,8 @@ idf.py -p COMx flash monitor
   `ESP32-Gateway-XXXXXX` SoftAP，密码为 `esp32setup`，配置地址为
   `http://192.168.4.1/`。
 - 连接该热点后调用 `GET /api/config` 查看当前配置，再向 `POST /api/config`
-  写入有效的 Wi-Fi、MQTT、设备 ID 和至少 16 位随机 API Token。配网态的配置接口
+  写入有效的 Wi-Fi、MQTT、设备 ID、至少 16 位随机 API Token 和至少 32 位随机
+  `command_secret`。配网态的配置接口
   仅在本地 SoftAP 放行，保存成功后设备会自动停止 SoftAP、切回 Station 并联网。
 - 例如：
 
@@ -54,6 +56,7 @@ $body = @{
   mqtt_password = "mqtt-password"
   device_id = "esp32_gateway_001"
   api_token = "replace-with-a-random-token-at-least-16-chars"
+  command_secret = "replace-with-a-random-command-secret-at-least-32-chars"
   sample_period_ms = 2000
   modbus_enabled = $false
   modbus_slave_addr = 1

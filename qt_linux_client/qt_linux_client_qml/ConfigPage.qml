@@ -17,6 +17,7 @@ Rectangle {
     property alias mqttPassword: mqttPasswordField.text
     property alias deviceId: deviceIdField.text
     property alias apiToken: apiTokenField.text
+    property alias commandSecret: commandSecretField.text
     property alias samplePeriod: samplePeriodField.value
     property alias modbusEnabled: modbusEnabledCheck.checked
     property alias modbusSlaveAddr: modbusSlaveAddrField.value
@@ -29,6 +30,7 @@ Rectangle {
         wifiPasswordField.text = ""
         mqttPasswordField.text = ""
         apiTokenField.text = ""
+        commandSecretField.text = ""
     }
 
     signal reloadRequested()
@@ -121,6 +123,14 @@ Rectangle {
                     Layout.fillWidth: true
                     echoMode: TextInput.Password
                     placeholderText: "留空表示不修改"
+                }
+
+                Label { text: "新 MQTT 命令密钥" }
+                TextField {
+                    id: commandSecretField
+                    Layout.fillWidth: true
+                    echoMode: TextInput.Password
+                    placeholderText: "至少 32 位，留空表示不修改"
                 }
 
                 Label { text: "采样周期 (ms)" }

@@ -124,6 +124,7 @@ ApplicationWindow {
                         "mqtt_password": mqttPassword,
                         "device_id": deviceId,
                         "api_token": apiToken,
+                        "command_secret": commandSecret,
                         "sample_period_ms": samplePeriod,
                         "modbus_enabled": modbusEnabled,
                         "modbus_slave_addr": modbusSlaveAddr,

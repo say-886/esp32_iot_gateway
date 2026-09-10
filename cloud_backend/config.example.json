@@ -13,6 +13,8 @@
     "password": "YOUR_EMQX_PASSWORD",
     "rejectUnauthorized": true,
     "topicRoot": "esp32/gateway",
-    "defaultDeviceId": "esp32_gateway_001"
+    "defaultDeviceId": "esp32_gateway_001",
+    "commandSecret": "REPLACE_WITH_RANDOM_COMMAND_SECRET_32_CHARS",
+    "devices": {}
   }
 }

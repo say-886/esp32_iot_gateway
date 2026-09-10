@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include <QDateTime>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -30,6 +31,43 @@ constexpr int kTelemetryDedupMs = 1200;
 QString boolText(bool value, const QString &trueText, const QString &falseText)
 {
     return value ? trueText : falseText;
+}
+
+QByteArray hmacSha256Hex(const QByteArray &key, const QByteArray &message)
+{
+    constexpr int blockSize = 64;
+    QByteArray normalizedKey = key;
+    if (normalizedKey.size() > blockSize) {
+        normalizedKey = QCryptographicHash::hash(normalizedKey, QCryptographicHash::Sha256);
+    }
+    normalizedKey.resize(blockSize);
+    QByteArray innerPad(blockSize, char(0x36));
+    QByteArray outerPad(blockSize, char(0x5c));
+    for (int i = 0; i < blockSize; ++i) {
+        innerPad[i] = static_cast<char>(innerPad.at(i) ^ normalizedKey.at(i));
+        outerPad[i] = static_cast<char>(outerPad.at(i) ^ normalizedKey.at(i));
+    }
+    const QByteArray inner =
+        QCryptographicHash::hash(innerPad + message, QCryptographicHash::Sha256);
+    return QCryptographicHash::hash(outerPad + inner, QCryptographicHash::Sha256).toHex();
+}
+
+QByteArray commandCanonical(const QString &deviceId,
+                            const QString &cmdId,
+                            qint64 createdAt,
+                            qint64 expiresAt,
+                            const QString &target,
+                            bool value)
+{
+    const QString led = target == QStringLiteral("led") ? (value ? QStringLiteral("1") : QStringLiteral("0")) : QStringLiteral("-");
+    const QString buzzer = target == QStringLiteral("buzzer") ? (value ? QStringLiteral("1") : QStringLiteral("0")) : QStringLiteral("-");
+    const QString relay = target == QStringLiteral("relay") ? (value ? QStringLiteral("1") : QStringLiteral("0")) : QStringLiteral("-");
+    return QStringLiteral("v1\n%1\n%2\ncontrol\n%3\n%4\n%5\n%6\n%7")
+        .arg(deviceId, cmdId)
+        .arg(createdAt)
+        .arg(expiresAt)
+        .arg(led, buzzer, relay)
+        .toUtf8();
 }
 
 bool jsonToBool(const QJsonValue &value)
@@ -439,6 +477,10 @@ void AppController::saveConfig(const QVariantMap &configData)
     addString(QStringLiteral("mqtt_password"), configData);
     addString(QStringLiteral("device_id"), configData);
     addString(QStringLiteral("api_token"), configData);
+    addString(QStringLiteral("command_secret"), configData);
+    if (!configData.value(QStringLiteral("command_secret")).toString().trimmed().isEmpty()) {
+        m_commandSecret = configData.value(QStringLiteral("command_secret")).toString().trimmed();
+    }
     addInt(QStringLiteral("sample_period_ms"), configData);
     addBool(QStringLiteral("modbus_enabled"), configData);
     addInt(QStringLiteral("modbus_slave_addr"), configData);
@@ -1036,19 +1078,26 @@ void AppController::handleMqttRuntimeChanged()
 void AppController::sendControlCommand(const QString &target, bool nextValue, const QString &label)
 {
     const qint64 createdAt = QDateTime::currentMSecsSinceEpoch();
+    const qint64 expiresAt = createdAt + 30000;
+    const QString deviceId = m_dashboardDeviceId.trimmed();
+    const QString cmdId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QJsonObject control;
     control.insert(target, nextValue ? 1 : 0);
     QJsonObject command;
     command.insert(QStringLiteral("schema"), 1);
-    command.insert(QStringLiteral("cmd_id"),
-                   QUuid::createUuid().toString(QUuid::WithoutBraces));
+    command.insert(QStringLiteral("device_id"), deviceId);
+    command.insert(QStringLiteral("cmd_id"), cmdId);
     command.insert(QStringLiteral("type"), QStringLiteral("control"));
     command.insert(QStringLiteral("created_at"), static_cast<double>(createdAt));
-    command.insert(QStringLiteral("expires_at"), static_cast<double>(createdAt + 30000));
-    command.insert(QStringLiteral("auth"), m_token);
+    command.insert(QStringLiteral("expires_at"), static_cast<double>(expiresAt));
+    command.insert(QStringLiteral("auth"),
+                   QString::fromLatin1(hmacSha256Hex(
+                       m_commandSecret.toUtf8(),
+                       commandCanonical(deviceId, cmdId, createdAt, expiresAt, target, nextValue))));
     command.insert(QStringLiteral("payload"), control);
 
-    if (m_mqttClient.canPublishControl()) {
+    if (!m_commandSecret.isEmpty() && !deviceId.isEmpty() && deviceId != QStringLiteral("--") &&
+        m_mqttClient.canPublishControl()) {
         if (m_mqttClient.publishControl(command)) {
             if (m_connectionStatus == QStringLiteral("已连接")) {
                 requestStatus();
