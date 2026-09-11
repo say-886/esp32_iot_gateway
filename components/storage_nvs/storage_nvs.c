@@ -1,5 +1,6 @@
 #include "storage_nvs.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -146,6 +147,7 @@ static const app_config_t DEFAULT_CONFIG = {
 
 static app_config_t s_cached_config;
 static SemaphoreHandle_t s_config_mutex;
+static SemaphoreHandle_t s_command_history_mutex;
 static bool s_cache_ready;
 
 static void config_lock(void)
@@ -363,6 +365,12 @@ esp_err_t storage_nvs_init(void)
             return ESP_ERR_NO_MEM;
         }
     }
+    if (s_command_history_mutex == NULL) {
+        s_command_history_mutex = xSemaphoreCreateMutex();
+        if (s_command_history_mutex == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
 
     app_config_t loaded;
     err = load_from_nvs(&loaded);
@@ -502,5 +510,38 @@ esp_err_t storage_save_command_history(const storage_command_history_t *history)
         err = nvs_commit(handle);
     }
     nvs_close(handle);
+    return err;
+}
+
+esp_err_t storage_claim_command_id(const char *cmd_id, bool *duplicate)
+{
+    if (cmd_id == NULL || cmd_id[0] == '\0' || strlen(cmd_id) >= STORAGE_COMMAND_ID_MAX_LEN ||
+        duplicate == NULL || s_command_history_mutex == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *duplicate = false;
+    xSemaphoreTake(s_command_history_mutex, portMAX_DELAY);
+
+    storage_command_history_t history = {0};
+    esp_err_t err = storage_load_command_history(&history);
+    if (err == ESP_OK) {
+        for (uint32_t i = 0; i < STORAGE_COMMAND_HISTORY_COUNT; ++i) {
+            if (history.ids[i][0] != '\0' && strcmp(history.ids[i], cmd_id) == 0) {
+                *duplicate = true;
+                break;
+            }
+        }
+        if (!*duplicate) {
+            snprintf(history.ids[history.next], sizeof(history.ids[history.next]), "%s", cmd_id);
+            if (history.count < STORAGE_COMMAND_HISTORY_COUNT) {
+                history.count++;
+            }
+            history.next = (history.next + 1U) % STORAGE_COMMAND_HISTORY_COUNT;
+            err = storage_save_command_history(&history);
+        }
+    }
+
+    xSemaphoreGive(s_command_history_mutex);
     return err;
 }

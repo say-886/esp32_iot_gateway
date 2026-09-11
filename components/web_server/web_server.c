@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <time.h>
 
 #include "app_state.h"
 #include "cJSON.h"
@@ -14,6 +16,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mbedtls/md.h"
 #include "modbus_service.h"
 #include "mqtt_service.h"
 #include "ota_service.h"
@@ -29,6 +32,9 @@ static volatile bool s_ota_running;
 
 #define WEB_MIN_API_TOKEN_LENGTH 16U
 #define WEB_MIN_COMMAND_SECRET_LENGTH 32U
+#define WEB_COMMAND_BODY_MAX 768U
+#define WEB_COMMAND_MAX_TTL_MS 300000ULL
+#define WEB_VALID_UNIX_TIME 1700000000LL
 
 typedef struct {
     char url[192];
@@ -102,6 +108,81 @@ static bool command_secret_is_secure(const char *secret)
 
 static void set_security_headers(httpd_req_t *req);
 static esp_err_t require_api_auth(httpd_req_t *req);
+
+static bool json_get_u64(const cJSON *root, const char *key, uint64_t *value)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (!cJSON_IsNumber(item) || !isfinite(item->valuedouble) || item->valuedouble < 1.0 ||
+        item->valuedouble > 9007199254740991.0 || item->valuedouble != floor(item->valuedouble)) {
+        return false;
+    }
+    *value = (uint64_t)item->valuedouble;
+    return true;
+}
+
+static bool build_command_canonical(char *buffer,
+                                    size_t buffer_size,
+                                    const char *device_id,
+                                    const char *cmd_id,
+                                    uint64_t created_at,
+                                    uint64_t expires_at,
+                                    const device_cmd_t *cmd)
+{
+    int len = snprintf(buffer, buffer_size, "v1\n%s\n%s\ncontrol\n%llu\n%llu\n%c\n%c\n%c",
+                       device_id, cmd_id, (unsigned long long)created_at,
+                       (unsigned long long)expires_at,
+                       cmd->led_set ? (cmd->led_value ? '1' : '0') : '-',
+                       cmd->buzzer_set ? (cmd->buzzer_value ? '1' : '0') : '-',
+                       cmd->relay_set ? (cmd->relay_value ? '1' : '0') : '-');
+    return len >= 0 && len < (int)buffer_size;
+}
+
+static bool hmac_sha256_hex(const char *secret, const char *canonical, char output[65])
+{
+    const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    unsigned char digest[32];
+    if (!command_secret_is_secure(secret) || md_info == NULL ||
+        mbedtls_md_hmac(md_info, (const unsigned char *)secret, strlen(secret),
+                        (const unsigned char *)canonical, strlen(canonical), digest) != 0) {
+        return false;
+    }
+    for (size_t i = 0; i < sizeof(digest); ++i) {
+        snprintf(output + i * 2U, 3U, "%02x", digest[i]);
+    }
+    output[64] = '\0';
+    return true;
+}
+
+static esp_err_t send_command_response(httpd_req_t *req,
+                                       int status_code,
+                                       const char *cmd_id,
+                                       const char *status,
+                                       int code,
+                                       const char *error)
+{
+    device_status_t reported;
+    device_status_get(&reported);
+    char response[320];
+    int len = snprintf(response, sizeof(response),
+                       "{\"ok\":%s,\"cmd_id\":\"%s\",\"status\":\"%s\",\"code\":%d,"
+                       "\"reported\":{\"led\":%d,\"buzzer\":%d,\"relay\":%d}%s%s%s}",
+                       status_code < 400 ? "true" : "false", cmd_id, status, code,
+                       reported.led_on ? 1 : 0, reported.buzzer_on ? 1 : 0,
+                       reported.relay_on ? 1 : 0, error != NULL ? ",\"error\":\"" : "",
+                       error != NULL ? error : "", error != NULL ? "\"" : "");
+    if (len < 0 || len >= (int)sizeof(response)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "command response overflow");
+    }
+    char http_status[32];
+    const char *reason = status_code == 200 ? "OK" :
+                         status_code == 400 ? "Bad Request" :
+                         status_code == 401 ? "Unauthorized" :
+                         status_code == 500 ? "Internal Server Error" : "Error";
+    snprintf(http_status, sizeof(http_status), "%d %s", status_code, reason);
+    httpd_resp_set_status(req, http_status);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, response, len);
+}
 
 static bool wifi_credentials_are_configured(const app_config_t *config)
 {
@@ -538,22 +619,88 @@ static esp_err_t control_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    char body[128] = {0};
+    char body[WEB_COMMAND_BODY_MAX] = {0};
     if (receive_request_body(req, body, sizeof(body)) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body size");
     }
 
+    app_config_t app_config;
+    if (storage_load_config(&app_config) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load config failed");
+    }
     cJSON *root = cJSON_Parse(body);
     device_cmd_t cmd = {0};
+    const cJSON *initial_payload = root != NULL ? cJSON_GetObjectItemCaseSensitive(root, "payload") : NULL;
+    const cJSON *initial_control = cJSON_IsObject(initial_payload) ? initial_payload : root;
     bool valid = root != NULL && cJSON_IsObject(root) &&
-                 json_get_bool(root, "led", &cmd.led_set, &cmd.led_value) &&
-                 json_get_bool(root, "buzzer", &cmd.buzzer_set, &cmd.buzzer_value) &&
-                 json_get_bool(root, "relay", &cmd.relay_set, &cmd.relay_value) &&
+                 json_get_bool(initial_control, "led", &cmd.led_set, &cmd.led_value) &&
+                 json_get_bool(initial_control, "buzzer", &cmd.buzzer_set, &cmd.buzzer_value) &&
+                 json_get_bool(initial_control, "relay", &cmd.relay_set, &cmd.relay_value) &&
                  (cmd.led_set || cmd.buzzer_set || cmd.relay_set);
     if (!valid) {
         cJSON_Delete(root);
         ESP_LOGW(TAG, "invalid control payload: %s", body);
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid control payload");
+    }
+
+    const cJSON *cmd_id_item = cJSON_GetObjectItemCaseSensitive(root, "cmd_id");
+    bool has_envelope_field = cmd_id_item != NULL ||
+                              cJSON_GetObjectItemCaseSensitive(root, "device_id") != NULL ||
+                              cJSON_GetObjectItemCaseSensitive(root, "type") != NULL ||
+                              cJSON_GetObjectItemCaseSensitive(root, "created_at") != NULL ||
+                              cJSON_GetObjectItemCaseSensitive(root, "expires_at") != NULL ||
+                              cJSON_GetObjectItemCaseSensitive(root, "auth") != NULL;
+    bool secure_command = cJSON_IsString(cmd_id_item) && cmd_id_item->valuestring != NULL &&
+                          cmd_id_item->valuestring[0] != '\0' && strlen(cmd_id_item->valuestring) < 64U;
+    if (has_envelope_field && !secure_command) {
+        cJSON_Delete(root);
+        return send_command_response(req, 400, "", "rejected", ESP_ERR_INVALID_ARG,
+                                     "invalid command envelope");
+    }
+    char cmd_id[64] = "legacy-http";
+    if (secure_command) {
+        snprintf(cmd_id, sizeof(cmd_id), "%s", cmd_id_item->valuestring);
+        uint64_t created_at = 0U, expires_at = 0U;
+        const cJSON *device_id = cJSON_GetObjectItemCaseSensitive(root, "device_id");
+        const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
+        const cJSON *auth = cJSON_GetObjectItemCaseSensitive(root, "auth");
+        const cJSON *payload = cJSON_GetObjectItemCaseSensitive(root, "payload");
+        const cJSON *control = cJSON_IsObject(payload) ? payload : root;
+        device_cmd_t signed_cmd = {0};
+        bool signed_valid = cJSON_IsString(device_id) && strcmp(device_id->valuestring, app_config.device_id) == 0 &&
+                            cJSON_IsString(type) && strcmp(type->valuestring, "control") == 0 &&
+                            json_get_u64(root, "created_at", &created_at) && json_get_u64(root, "expires_at", &expires_at) &&
+                            expires_at > created_at && expires_at - created_at <= WEB_COMMAND_MAX_TTL_MS &&
+                            json_get_bool(control, "led", &signed_cmd.led_set, &signed_cmd.led_value) &&
+                            json_get_bool(control, "buzzer", &signed_cmd.buzzer_set, &signed_cmd.buzzer_value) &&
+                            json_get_bool(control, "relay", &signed_cmd.relay_set, &signed_cmd.relay_value) &&
+                            (signed_cmd.led_set || signed_cmd.buzzer_set || signed_cmd.relay_set);
+        time_t now = time(NULL);
+        if (!signed_valid || now < WEB_VALID_UNIX_TIME || (uint64_t)now * 1000ULL > expires_at ||
+            (uint64_t)now * 1000ULL + WEB_COMMAND_MAX_TTL_MS < created_at ||
+            !cJSON_IsString(auth) || !command_secret_is_secure(app_config.command_secret)) {
+            cJSON_Delete(root);
+            return send_command_response(req, 401, cmd_id, "unauthorized", ESP_ERR_INVALID_STATE, "invalid command authentication");
+        }
+        char canonical[256], expected_auth[65];
+        if (!build_command_canonical(canonical, sizeof(canonical), app_config.device_id, cmd_id,
+                                     created_at, expires_at, &signed_cmd) ||
+            !hmac_sha256_hex(app_config.command_secret, canonical, expected_auth) ||
+            !constant_time_equal(auth->valuestring, expected_auth)) {
+            cJSON_Delete(root);
+            return send_command_response(req, 401, cmd_id, "unauthorized", ESP_ERR_INVALID_STATE, "invalid command authentication");
+        }
+        bool duplicate = false;
+        esp_err_t history_err = storage_claim_command_id(cmd_id, &duplicate);
+        if (history_err != ESP_OK) {
+            cJSON_Delete(root);
+            return send_command_response(req, 500, cmd_id, "rejected", history_err, "command history unavailable");
+        }
+        if (duplicate) {
+            cJSON_Delete(root);
+            return send_command_response(req, 200, cmd_id, "duplicate", 0, NULL);
+        }
+        cmd = signed_cmd;
     }
 
     ESP_LOGI(TAG,
@@ -568,8 +715,9 @@ static esp_err_t control_handler(httpd_req_t *req)
     device_status_update_control(&cmd);
     cJSON_Delete(root);
 
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"ok\":true}");
+    return secure_command ? send_command_response(req, 200, cmd_id, "executed", 0, NULL)
+                           : (httpd_resp_set_type(req, "application/json"),
+                              httpd_resp_sendstr(req, "{\"ok\":true,\"status\":\"executed\"}"));
 }
 
 static esp_err_t config_get_handler(httpd_req_t *req)

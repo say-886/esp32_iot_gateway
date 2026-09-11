@@ -67,4 +67,16 @@ esp_err_t storage_reset_config(void);
 esp_err_t storage_load_command_history(storage_command_history_t *history);
 esp_err_t storage_save_command_history(const storage_command_history_t *history);
 
+/**
+ * @brief 原子地声明一个已执行命令 ID。
+ *
+ * 该接口在同一个 NVS 临界区内完成查重和写入，供 MQTT 与 HTTP 控制链路
+ * 共享，避免相同 cmd_id 经由两条链路并发到达时被重复执行。
+ *
+ * @param cmd_id 已通过鉴权、长度合法的命令 ID。
+ * @param duplicate 输出参数，true 表示该 ID 已存在且未写入。
+ * @return esp_err_t NVS 读写结果。
+ */
+esp_err_t storage_claim_command_id(const char *cmd_id, bool *duplicate);
+
 #endif

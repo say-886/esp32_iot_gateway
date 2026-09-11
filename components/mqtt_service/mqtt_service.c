@@ -13,6 +13,7 @@
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "error_code.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -29,7 +30,6 @@
 #define MQTT_RECONNECT_BASE_MS 1000U
 #define MQTT_RECONNECT_MAX_MS 30000U
 #define MQTT_REPLAY_PERIOD_MS 500U
-#define MQTT_RECENT_COMMAND_COUNT STORAGE_COMMAND_HISTORY_COUNT
 #define MQTT_RAM_QUEUE_CAPACITY 8U
 #define MQTT_RELIABLE_BURST_MAX 4U
 #define MQTT_CAPTURED_OFFLINE_FLAG (1U << 0)
@@ -95,11 +95,6 @@ static uint32_t s_ram_queue_count;
 static uint32_t s_boot_id;
 /** @brief 递增的遥测序号。*/
 static uint32_t s_sequence;
-/** @brief 最近执行过的命令 ID 环形表。*/
-static char s_recent_cmd_ids[MQTT_RECENT_COMMAND_COUNT][64];
-/** @brief 最近命令表写入位置。*/
-static uint32_t s_recent_cmd_next;
-
 /** @brief 当前 broker URI。*/
 static char s_broker_uri[96];
 /** @brief 当前设备 ID。*/
@@ -437,58 +432,6 @@ static bool hmac_sha256_hex(const char *secret,
  * @param cmd_id 命令 ID。
  * @return bool 已执行过返回 true。
  */
-static bool command_was_executed(const char *cmd_id)
-{
-    bool found = false;
-    state_lock();
-    for (uint32_t i = 0; i < MQTT_RECENT_COMMAND_COUNT; ++i) {
-        if (s_recent_cmd_ids[i][0] != '\0' && strcmp(s_recent_cmd_ids[i], cmd_id) == 0) {
-            found = true;
-            break;
-        }
-    }
-    state_unlock();
-    return found;
-}
-
-/**
- * @brief 记录最近执行过的命令 ID。
- * @param cmd_id 命令 ID。
- */
-static esp_err_t remember_executed_command(const char *cmd_id)
-{
-    storage_command_history_t history = {0};
-    state_lock();
-    for (uint32_t i = 0; i < MQTT_RECENT_COMMAND_COUNT; ++i) {
-        snprintf(history.ids[i], sizeof(history.ids[i]), "%s", s_recent_cmd_ids[i]);
-    }
-    history.count = 0U;
-    for (uint32_t i = 0; i < MQTT_RECENT_COMMAND_COUNT; ++i) {
-        if (history.ids[i][0] != '\0') {
-            history.count++;
-        }
-    }
-    history.next = s_recent_cmd_next;
-    snprintf(history.ids[history.next], sizeof(history.ids[history.next]),
-             "%s",
-             cmd_id);
-    if (history.count < MQTT_RECENT_COMMAND_COUNT) {
-        history.count++;
-    }
-    history.next = (history.next + 1U) % MQTT_RECENT_COMMAND_COUNT;
-    /* Keep the state lock through the NVS write so concurrent MQTT callbacks
-     * cannot overwrite one another's command history snapshot. */
-    esp_err_t err = storage_save_command_history(&history);
-    if (err != ESP_OK) {
-        state_unlock();
-        return err;
-    }
-    memcpy(s_recent_cmd_ids, history.ids, sizeof(s_recent_cmd_ids));
-    s_recent_cmd_next = history.next;
-    state_unlock();
-    return ESP_OK;
-}
-
 /**
  * @brief 在连接可用时直接发布原始 MQTT 消息。
  * @param topic 主题。
@@ -649,15 +592,16 @@ static void handle_control_payload(const char *body, int len)
         return;
     }
 
-    if (command_was_executed(cmd_id)) {
-        cJSON_Delete(root);
-        publish_command_ack(cmd_id, "duplicate", ESP_OK);
-        return;
-    }
-
-    if (remember_executed_command(cmd_id) != ESP_OK) {
+    bool duplicate = false;
+    esp_err_t claim_err = storage_claim_command_id(cmd_id, &duplicate);
+    if (claim_err != ESP_OK) {
         cJSON_Delete(root);
         publish_command_ack(cmd_id, "rejected", APP_ERR_STORAGE_FAILED);
+        return;
+    }
+    if (duplicate) {
+        cJSON_Delete(root);
+        publish_command_ack(cmd_id, "duplicate", ESP_OK);
         return;
     }
     device_status_update_control(&cmd);
@@ -1131,16 +1075,6 @@ esp_err_t mqtt_service_start(void)
     if (secret_len < 0 || secret_len >= (int)sizeof(s_command_secret)) {
         return ESP_ERR_INVALID_SIZE;
     }
-    storage_command_history_t command_history = {0};
-    err = storage_load_command_history(&command_history);
-    if (err != ESP_OK) {
-        return err;
-    }
-    state_lock();
-    memcpy(s_recent_cmd_ids, command_history.ids, sizeof(s_recent_cmd_ids));
-    s_recent_cmd_next = command_history.next;
-    state_unlock();
-
     int uri_len = snprintf(s_broker_uri,
                            sizeof(s_broker_uri),
                            "%s://%s:%u",

@@ -27,6 +27,7 @@ const CONFIG_FILE = process.env.IOT_CONFIG_FILE
   : path.join(ROOT, "config.local.json");
 const CONFIG_EXAMPLE_FILE = path.join(ROOT, "config.example.json");
 const MIN_COMMAND_SECRET_LENGTH = 32;
+const MIN_DEVICE_HTTP_TOKEN_LENGTH = 16;
 const INSECURE_COMMAND_SECRET_PATTERN = /^(YOUR_|REPLACE_|CHANGE_ME|example|test$)/i;
 const COMMAND_ACK_STATUSES = new Set([
   "executed",
@@ -183,6 +184,10 @@ database.exec(`
   );
 `);
 
+if (!database.prepare("PRAGMA table_info(commands)").all().some((column) => column.name === "transport")) {
+  database.exec("ALTER TABLE commands ADD COLUMN transport TEXT NOT NULL DEFAULT 'mqtt'");
+}
+
 const statements = {
   upsertDevice: database.prepare(`
     INSERT INTO devices (
@@ -207,11 +212,11 @@ const statements = {
   `),
   insertCommand: database.prepare(`
     INSERT INTO commands (
-      cmd_id, device_id, type, payload_json, status, created_at, expires_at
-    ) VALUES (?, ?, ?, ?, 'PENDING', ?, ?)
+      cmd_id, device_id, type, transport, payload_json, status, created_at, expires_at
+    ) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)
   `),
   nextPendingCommands: database.prepare(`
-    SELECT cmd_id, device_id, payload_json, expires_at
+    SELECT cmd_id, device_id, transport, payload_json, expires_at
     FROM commands
     WHERE status = 'PENDING' AND expires_at > ?
     ORDER BY created_at ASC
@@ -540,13 +545,21 @@ function commandTopic(deviceId) {
 }
 
 function dispatchPendingCommands() {
-  if (!mqttConnected || shuttingDown) {
+  if (shuttingDown) {
     return;
   }
   const now = Date.now();
   statements.markTimedOut.run(now);
   for (const command of statements.nextPendingCommands.all(now)) {
     if (publishingCommands.has(command.cmd_id)) {
+      continue;
+    }
+    if (command.transport === "http") {
+      publishingCommands.add(command.cmd_id);
+      void dispatchHttpCommand(command);
+      continue;
+    }
+    if (!mqttConnected) {
       continue;
     }
     publishingCommands.add(command.cmd_id);
@@ -568,6 +581,81 @@ function dispatchPendingCommands() {
   }
 }
 
+function getHttpDeviceConfig(deviceId) {
+  const deviceConfig = config.mqtt.devices?.[deviceId] || {};
+  const httpUrl = String(deviceConfig.httpUrl || config.mqtt.httpUrl || "").trim().replace(/\/+$/, "");
+  const apiToken = String(
+    deviceConfig.apiToken || deviceConfig.httpApiToken || config.mqtt.httpApiToken || ""
+  );
+  if (!/^https?:\/\//i.test(httpUrl)) {
+    throw new Error(`httpUrl is not configured for device ${deviceId}`);
+  }
+  if (apiToken.length < MIN_DEVICE_HTTP_TOKEN_LENGTH || /^(CHANGE_ME|REPLACE_WITH|YOUR_)/i.test(apiToken)) {
+    throw new Error(`apiToken is not securely configured for device ${deviceId}`);
+  }
+  return { httpUrl, apiToken };
+}
+
+async function dispatchHttpCommand(command) {
+  try {
+    const { httpUrl, apiToken } = getHttpDeviceConfig(command.device_id);
+    const timeoutMs = Math.max(1000, Math.min(10000, command.expires_at - Date.now()));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    try {
+      response = await fetch(`${httpUrl}/api/control`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiToken}`
+        },
+        body: command.payload_json,
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    const raw = await response.text();
+    let payload = {};
+    try {
+      payload = raw ? JSON.parse(raw) : {};
+    } catch {
+      throw new Error(`device returned invalid JSON (HTTP ${response.status})`);
+    }
+    if (!response.ok) {
+      const ackStatus = String(payload.status || "");
+      if (COMMAND_ACK_STATUSES.has(ackStatus)) {
+        statements.markAcknowledged.run(
+          nowIso(), ackStatus, Math.trunc(finiteNumber(payload.code, response.status)),
+          JSON.stringify({ ...payload, transport: "http" }), command.cmd_id, command.device_id
+        );
+        return;
+      }
+      throw new Error(payload.error || `device HTTP ${response.status}`);
+    }
+    if (payload.ok !== true) {
+      throw new Error(payload.error || "device rejected command");
+    }
+    statements.markPublished.run(nowIso(), command.cmd_id);
+    statements.markAcknowledged.run(
+      nowIso(), String(payload.status || "executed"), Math.trunc(finiteNumber(payload.code, 0)),
+      JSON.stringify({ ...payload, transport: "http" }), command.cmd_id, command.device_id
+    );
+    console.log(`[command] HTTP acknowledged cmd_id=${command.cmd_id} device=${command.device_id}`);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      statements.markTimedOut.run(command.expires_at);
+      console.warn(`[command] HTTP timeout cmd_id=${command.cmd_id}`);
+    } else {
+      statements.markPublishFailed.run(error.message, command.cmd_id);
+      console.warn(`[command] HTTP publish failed cmd_id=${command.cmd_id}: ${error.message}`);
+    }
+  } finally {
+    publishingCommands.delete(command.cmd_id);
+  }
+}
+
 function createCommand(deviceId, input) {
   const allowedTargets = ["led", "buzzer", "relay"];
   const control = input.payload && typeof input.payload === "object" ? input.payload : input;
@@ -585,6 +673,13 @@ function createCommand(deviceId, input) {
     throw new Error("command must include led, buzzer or relay");
   }
 
+  const transport = input.transport == null ? "mqtt" : String(input.transport).toLowerCase();
+  if (transport !== "mqtt" && transport !== "http") {
+    throw new Error("transport must be mqtt or http");
+  }
+  if (transport === "http") {
+    getHttpDeviceConfig(deviceId);
+  }
   const cmdId = crypto.randomUUID();
   const createdAt = Date.now();
   const ttlMs = Math.max(1000, Math.min(300000, finiteNumber(input.ttl_ms, config.server.commandTimeoutMs)));
@@ -612,13 +707,14 @@ function createCommand(deviceId, input) {
     cmdId,
     deviceId,
     "control",
+    transport,
     JSON.stringify(envelope),
     new Date(createdAt).toISOString(),
     expiresAt
   );
   dispatchPendingCommands();
   const { auth: _auth, ...publicEnvelope } = envelope;
-  return { cmd_id: cmdId, device_id: deviceId, status: "PENDING", envelope: publicEnvelope };
+  return { cmd_id: cmdId, device_id: deviceId, transport, status: "PENDING", envelope: publicEnvelope };
 }
 
 function getCommandSecret(deviceId) {
@@ -656,7 +752,7 @@ function sendJson(res, statusCode, body) {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, X-API-Key, Authorization",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
   });
   res.end(payload);

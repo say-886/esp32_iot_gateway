@@ -16,6 +16,7 @@ idf_component_register(
         storage_nvs
         wifi_manager
         esp_http_server
+        mbedtls
         esp_system
         json
 )

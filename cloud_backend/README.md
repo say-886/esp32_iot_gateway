@@ -41,6 +41,8 @@ npm start
     "topicRoot": "esp32/gateway",
     "defaultDeviceId": "esp32_gateway_001",
     "commandSecret": "replace-with-a-random-command-secret-at-least-32-chars",
+    "httpUrl": "",
+    "httpApiToken": "",
     "devices": {}
   }
 }
@@ -101,13 +103,14 @@ esp32/gateway/+/cmd_ack
 
 ```json
 {
+  "transport": "mqtt",
   "led": 1,
   "relay": 0,
   "ttl_ms": 30000
 }
 ```
 
-接口返回 `202` 和 `cmd_id`。前端可轮询 `/api/commands/:cmdId` 直到 `ACKED/TIMEOUT/FAILED`。
+`transport` 可选 `mqtt`（默认）或 `http`。使用 `http` 时，在 `mqtt.devices.<device_id>` 中配置 `httpUrl` 和 `apiToken`（也可使用全局 `mqtt.httpUrl/httpApiToken`）；云端将直接 POST 到设备 `/api/control`，仍使用同一套 `cmd_id`、时间窗和 HMAC envelope。接口返回 `202` 和 `cmd_id`，调用方可轮询 `/api/commands/:cmdId` 直到 `ACKED/TIMEOUT/FAILED`。
 
 设备影子使用 `desired/reported/version` 三部分表示云端期望状态、设备实际上报状态和版本号。监控摘要可通过 `GET /api/metrics` 获取。
 
@@ -134,6 +137,8 @@ esp32/gateway/+/cmd_ack
 ```powershell
 npm run check
 npm run test:auth
+npm run test:api-auth
+npm run test:http-command
 ```
 
 `test:auth` 校验 Node.js 侧的 canonical string 和 HMAC-SHA256 测试向量。设备端使用 mbedTLS 按同一格式验签；真实 Broker、设备 ACK 和跨重启重放保护仍需硬件联调。
