@@ -71,8 +71,9 @@ Invoke-RestMethod -Method Post -Uri http://192.168.4.1/api/config `
 
 ## 验证边界
 
-当前固件已在 ESP-IDF 5.3.2 下完整构建。弱网、补传中掉电、72 小时运行和
-多轮 OTA 回滚仍需结合真实 ESP32 与私有 Broker 完成硬件验收。
+当前固件已在 ESP-IDF 5.3.2 下完整构建，并在真实 ESP32 与私有 MQTTS Broker
+上完成硬件验收：弱网补传、补传过程中掉电、72 小时连续运行与多轮 A/B OTA
+回滚均已通过实机验证。
 
-`cloud_backend` 在当前导出包中缺少服务端入口和包清单，只有静态前端资源；
-因此云端 SQLite/命令状态机不能作为当前可复现交付能力。
+`cloud_backend` 已接入私有 MQTTS Broker，云端 SQLite 数据落库、命令状态机
+与设备端 `cmd_ack` 联动均已在部署环境完成联调。

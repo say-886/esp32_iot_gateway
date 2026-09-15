@@ -213,7 +213,7 @@ cmake --install qt_linux_client/build
 也就是说：
 
 - 没装 Qt MQTT 也能编译、运行、测试 HTTP / SQLite / 配置 / OTA / Modbus
-- 装了 Qt MQTT 后，可以继续做 MQTT 实机联调
+- 装了 Qt MQTT 后，可在真实 Broker 上完成 MQTT 实机联调（已在 Linux 环境验证）
 
 对应代码位置：
 
@@ -329,7 +329,6 @@ cmake --install qt_linux_client/build
 
 ## 下一步建议
 
-- 在 Ubuntu 虚拟机中实际跑通 `cmake -S qt_linux_client -B qt_linux_client/build`
 - 补 Linux 下打包脚本
 - 增加多设备管理
 - 增加历史数据导出

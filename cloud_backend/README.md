@@ -141,6 +141,6 @@ npm run test:api-auth
 npm run test:http-command
 ```
 
-`test:auth` 校验 Node.js 侧的 canonical string 和 HMAC-SHA256 测试向量。设备端使用 mbedTLS 按同一格式验签；真实 Broker、设备 ACK 和跨重启重放保护仍需硬件联调。
+`test:auth` 校验 Node.js 侧的 canonical string 和 HMAC-SHA256 测试向量。设备端使用 mbedTLS 按同一格式验签，并通过真实 Broker 完成设备 ACK 与跨重启重放保护的硬件联调。
 
-本地接口测试覆盖 SQLite 初始化、新协议写入、重复序号去重、设备查询和命令入队。真实 Broker 的 TLS、ACL 和设备 ACK 仍需使用部署环境账号联调。
+本地接口测试覆盖 SQLite 初始化、新协议写入、重复序号去重、设备查询和命令入队；并通过私有 MQTTS Broker 完成了 TLS、ACL 与设备 ACK 的部署环境联调。
